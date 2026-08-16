@@ -1,0 +1,21 @@
+# Arquivo didatico: unidade systemd que mantem a SIX rodando no Ubuntu Server.
+
+# Metadados do servico.
+[Unit]
+Description=SIX Intranet
+After=network.target
+
+
+# Como iniciar e reiniciar o processo Node.js.
+[Service]
+Type=simple
+WorkingDirectory=/opt/six
+ExecStart=/usr/bin/node src/server.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+
+
+# Permite habilitar o servico para subir junto com o sistema.
+[Install]
+WantedBy=multi-user.target

@@ -1,0 +1,16 @@
+{
+  "name": "six-intranet",
+  "version": "0.1.0",
+  "description": "SIX, uma rede social escolar para intranet com Node.js e SQLite.",
+  "type": "module",
+  "main": "src/server.js",
+  "scripts": {
+    "start": "node src/server.js",
+    "dev": "node --watch src/server.js",
+    "test": "node --test"
+  },
+  "engines": {
+    "node": ">=24.0.0"
+  },
+  "license": "UNLICENSED"
+}

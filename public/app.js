@@ -1,0 +1,1673 @@
+// Arquivo didatico: interface web da SIX, escrita em JavaScript puro no navegador.
+const app = document.querySelector('#app');
+const toast = document.querySelector('#toast');
+const scriptUrl = new URL(document.currentScript?.src || 'app.js', window.location.href);
+const BASE_PATH = scriptUrl.pathname.replace(/\/app\.js$/, '').replace(/\/$/, '');
+const IMAGE_ACCEPT = 'image/png,image/jpeg,image/webp,image/gif';
+const MAX_IMAGE_BYTES = 4 * 1024 * 1024;
+const MAX_POST_IMAGES = 4;
+const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
+const VOICE_POLL_MS = 4000;
+const VOICE_SIGNAL_POLL_MS = 1200;
+const UNREAD_POLL_MS = 8000;
+
+
+// Monta URLs corretamente tanto na raiz quanto publicado em subpasta, como /xis/.
+function appPath(path = '/') {
+  const normalized = String(path || '/').startsWith('/') ? String(path || '/') : `/${path}`;
+  return `${BASE_PATH}${normalized}` || normalized;
+}
+
+
+// Converte URLs de uploads para respeitar o caminho publico atual da aplicacao.
+function mediaUrl(value) {
+  const text = String(value || '');
+  if (!text || text.startsWith('http://') || text.startsWith('https://') || text.startsWith('data:')) return text;
+  return text.startsWith('/') ? appPath(text) : text;
+}
+
+
+// Estado global simples da interface: configuracao, usuario atual, tela aberta e aba admin.
+const state = {
+  config: null,
+  me: null,
+  view: 'home',
+  params: {},
+  adminTab: 'requests',
+  unreadCounts: { notifications: 0, messages: 0 },
+  unreadPollTimer: null
+};
+
+
+// Itens do menu principal. Os icones sao gerados por navIconHtml().
+const navItems = [
+  ['home', 'Inicio'],
+  ['search', 'Busca'],
+  ['notifications', 'Avisos'],
+  ['messages', 'Mensagens'],
+  ['profile', 'Perfil']
+];
+// Estado da chamada de voz em andamento no navegador.
+const voiceState = {
+  call: null,
+  peer: null,
+  pc: null,
+  localStream: null,
+  remoteAudio: null,
+  signalCursor: 0,
+  incomingPollTimer: null,
+  signalPollTimer: null,
+  pendingCandidates: [],
+  pollingSignals: false,
+  isBusy: false,
+  isCaller: false,
+  statusText: ''
+};
+
+init().catch((error) => {
+  console.error(error);
+  app.innerHTML = `<div class="empty">Nao foi possivel iniciar a SIX.</div>`;
+});
+
+
+// Inicializacao: carrega configuracao, verifica sessao e decide entre login ou app principal.
+async function init() {
+  state.config = await api('/api/config');
+  const me = await api('/api/me');
+  state.me = me.user;
+  document.title = state.config.platformName;
+  if (state.me) {
+    await refreshUnreadCounts(false);
+    await go('home');
+    startVoicePolling();
+    startUnreadPolling();
+  } else {
+    renderAuth('login');
+  }
+}
+
+
+// Cliente HTTP unico da interface: envia JSON, cookies e transforma erros em mensagens.
+async function api(path, options = {}) {
+  const init = {
+    method: options.method || 'GET',
+    credentials: 'same-origin',
+    headers: {}
+  };
+
+  if (options.body !== undefined) {
+    init.headers['Content-Type'] = 'application/json';
+    init.body = JSON.stringify(options.body);
+  }
+
+  const response = await fetch(appPath(path), init);
+  const data = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(data.error || 'Erro na requisicao.');
+  return data;
+}
+
+
+// Tela de entrada: alterna entre login e cadastro institucional.
+function renderAuth(mode) {
+  const domains = state.config.allowedDomains.map((domain) => `@${domain}`).join(', ');
+  app.innerHTML = `
+    <main class="auth-wrap">
+      <section class="auth-brand">
+        <img class="brand-mark" src="${appPath('/assets/logo.svg')}" alt="${escapeAttr(state.config.platformName)}">
+        <div>
+          <h1 class="auth-title">${escapeHtml(state.config.platformName)}</h1>
+          <p class="auth-slogan">A Nossa Rede Social</p>
+          <p class="auth-subtitle">${escapeHtml(state.config.schoolName)}</p>
+        </div>
+      </section>
+      <section class="auth-card" aria-label="Acesso">
+        <div class="tabs">
+          <button class="tab ${mode === 'login' ? 'active' : ''}" data-auth-mode="login">Entrar</button>
+          <button class="tab ${mode === 'register' ? 'active' : ''}" data-auth-mode="register">Criar conta</button>
+        </div>
+        <form id="auth-form">
+          ${mode === 'register' ? `
+            <div class="field">
+              <label for="displayName">Nome</label>
+              <input id="displayName" name="displayName" autocomplete="name" required maxlength="60">
+            </div>
+            <div class="field">
+              <label for="username">Usuario</label>
+              <input id="username" name="username" autocomplete="username" required minlength="3" maxlength="24" pattern="[a-z0-9_]+">
+            </div>
+            <div class="field">
+              <label for="email">E-mail institucional</label>
+              <input id="email" name="email" type="email" autocomplete="email" required>
+              <span class="hint">${escapeHtml(domains)}</span>
+            </div>
+            <div class="field">
+              <label for="password">Senha</label>
+              <input id="password" name="password" type="password" autocomplete="new-password" required minlength="8">
+            </div>
+          ` : `
+            <div class="field">
+              <label for="login">Usuario ou e-mail</label>
+              <input id="login" name="login" autocomplete="username" required>
+            </div>
+            <div class="field">
+              <label for="password">Senha</label>
+              <input id="password" name="password" type="password" autocomplete="current-password" required>
+            </div>
+          `}
+          <button class="primary-btn auth-submit" type="submit">${mode === 'register' ? 'Criar conta' : 'Entrar'}</button>
+        </form>
+      </section>
+    </main>
+  `;
+
+  document.querySelectorAll('[data-auth-mode]').forEach((button) => {
+    button.addEventListener('click', () => renderAuth(button.dataset.authMode));
+  });
+
+  document.querySelector('#auth-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const form = new FormData(event.currentTarget);
+    try {
+      const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
+      const payload = mode === 'register'
+        ? {
+            displayName: form.get('displayName'),
+            username: form.get('username'),
+            email: form.get('email'),
+            password: form.get('password')
+          }
+        : {
+            login: form.get('login'),
+            password: form.get('password')
+          };
+      const result = await api(endpoint, { method: 'POST', body: payload });
+      state.me = result.user;
+      await refreshUnreadCounts(false);
+      await go('home');
+      startVoicePolling();
+      startUnreadPolling();
+      showToast(mode === 'register' && result.user.role === 'admin' ? 'Primeira conta criada como admin.' : 'Bem-vindo a SIX.');
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+}
+
+
+// Navegacao interna sem recarregar a pagina inteira.
+async function go(view, params = {}) {
+  state.view = view;
+  state.params = params;
+  if (state.me) await refreshUnreadCounts(false);
+  renderShell();
+
+  if (view === 'home') await loadHome();
+  if (view === 'search') await loadSearch(params.q || '');
+  if (view === 'notifications') await loadNotifications();
+  if (view === 'messages') await loadMessages(params.userId || null);
+  if (view === 'profile') await loadProfile(params.username || state.me.username);
+  if (view === 'thread') await loadThread(params.id);
+  if (view === 'admin') await loadAdmin(params.tab || state.adminTab);
+}
+// Icone de sair usado no perfil e no painel da conta.
+function logoutIconHtml() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M10 5H6.5A1.5 1.5 0 0 0 5 6.5v11A1.5 1.5 0 0 0 6.5 19H10"/><path d="M14 8l4 4-4 4"/><path d="M8 12h10"/></svg>';
+}
+// Icone de lixeira usado para exclusao administrativa imediata.
+function trashIconHtml() {
+  return '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h16"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M6 7l1 14h10l1-14"/><path d="M9 7V4h6v3"/></svg>';
+}
+
+// Gera os icones do menu principal. O perfil usa a foto/avatar do usuario logado.
+function navIconHtml(view) {
+  const icons = {
+    home: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3 10.7 12 3l9 7.7v9.8a1.5 1.5 0 0 1-1.5 1.5H15v-6h-6v6H4.5A1.5 1.5 0 0 1 3 20.5v-9.8Z"/></svg>',
+    search: '<svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="10.8" cy="10.8" r="6.8"/><path d="m16 16 5 5"/></svg>',
+    notifications: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18 9.5a6 6 0 0 0-12 0c0 7-3 7-3 8.5h18c0-1.5-3-1.5-3-8.5Z"/><path d="M9.5 21a2.7 2.7 0 0 0 5 0"/></svg>',
+    messages: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 6.5h16v11H4z"/><path d="m4.5 7 7.5 6 7.5-6"/></svg>',
+    admin: '<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 3 5 6v5c0 4.5 2.9 8.5 7 10 4.1-1.5 7-5.5 7-10V6l-7-3Z"/><path d="M9 12h6"/><path d="M12 9v6"/></svg>'
+  };
+  if (view === 'profile') return avatarHtml(state.me, 'nav-avatar');
+  return icons[view] || `<span>${escapeHtml(view.slice(0, 1).toUpperCase())}</span>`;
+}
+// Retorna o ponto vermelho quando existe aviso ou mensagem nao lida.
+function unreadBadgeHtml(view) {
+  const count = view === 'notifications'
+    ? state.unreadCounts.notifications
+    : view === 'messages'
+      ? state.unreadCounts.messages
+      : 0;
+  return count > 0 ? `<span class="nav-badge" title="${count} nao lido${count === 1 ? '' : 's'}"></span>` : '';
+}
+
+// Atualiza os contadores de nao lidos sem recarregar a pagina inteira.
+async function refreshUnreadCounts(updateDom = true) {
+  if (!state.me) return;
+  try {
+    const counts = await api('/api/unread-counts');
+    state.unreadCounts = {
+      notifications: Number(counts.notifications || 0),
+      messages: Number(counts.messages || 0)
+    };
+    if (updateDom) renderUnreadBadges();
+  } catch {
+    state.unreadCounts = { notifications: 0, messages: 0 };
+  }
+}
+
+function renderUnreadBadges() {
+  document.querySelectorAll('.nav-symbol .nav-badge').forEach((badge) => badge.remove());
+  ['notifications', 'messages'].forEach((view) => {
+    const holder = document.querySelector(`.nav-btn[data-go="${view}"] .nav-symbol`);
+    if (holder) holder.insertAdjacentHTML('beforeend', unreadBadgeHtml(view));
+  });
+}
+function startUnreadPolling() {
+  if (state.unreadPollTimer) return;
+  refreshUnreadCounts().catch(() => null);
+  state.unreadPollTimer = setInterval(() => refreshUnreadCounts().catch(() => null), UNREAD_POLL_MS);
+}
+
+function stopUnreadPolling() {
+  if (state.unreadPollTimer) clearInterval(state.unreadPollTimer);
+  state.unreadPollTimer = null;
+}
+
+// Estrutura fixa do app logado: menu esquerdo, coluna central e painel direito.
+function renderShell() {
+  const staffNav = isStaff() ? [['admin', 'Equipe']] : [];
+  const activeItems = [...navItems, ...staffNav];
+  app.innerHTML = `
+    <div class="main-layout">
+      <aside class="left-nav">
+        <div class="brand-row">
+          <img src="${appPath('/assets/logo.svg')}" alt="${escapeAttr(state.config.platformName)}">
+          <strong>${escapeHtml(state.config.platformName)}</strong>
+        </div>
+        <nav class="nav-list" aria-label="Principal">
+          ${activeItems.map(([view, label]) => `
+            <button class="nav-btn ${state.view === view ? 'active' : ''}" data-go="${view}">
+              <span class="nav-symbol">${navIconHtml(view)}${unreadBadgeHtml(view)}</span>
+              <span class="nav-label">${label}</span>
+            </button>
+          `).join('')}
+        </nav>
+        <button class="primary-btn post-wide" data-compose>Publicar</button>
+        <button class="account-mini" data-go="profile">
+          ${avatarHtml(state.me)}
+          <span class="account-text">
+            <strong>${escapeHtml(state.me.displayName)}</strong><br>
+            <span class="username">@${escapeHtml(state.me.username)}</span>
+          </span>
+        </button>
+      </aside>
+      <main id="main" class="feed-main">
+        <div class="view-header"><h1>${escapeHtml(viewTitle())}</h1></div>
+        <div class="loading">Carregando...</div>
+      </main>
+      <aside class="right-rail">
+        ${rightRailHtml()}
+      </aside>
+    </div>
+  `;
+
+  document.querySelectorAll('[data-go]').forEach((button) => {
+    button.addEventListener('click', () => {
+      const target = button.dataset.go;
+      if (target === 'profile') go('profile', { username: state.me.username });
+      else go(target);
+    });
+  });
+
+  document.querySelector('[data-compose]')?.addEventListener('click', () => {
+    go('home').then(() => document.querySelector('#composer-body')?.focus());
+  });
+
+  bindLogoutButtons(app);
+}
+
+
+// Painel lateral com contexto da escola e atalhos da equipe.
+function rightRailHtml() {
+  const domains = state.config.allowedDomains.map((domain) => `@${domain}`).join('<br>');
+  return `
+    <section class="rail-card">
+      <h2>${escapeHtml(state.config.schoolName)}</h2>
+      <div class="rail-row">
+        <strong>Rede escolar</strong>
+        <span class="muted">Todos os alunos visualizam a escola inteira.</span>
+      </div>
+      <div class="rail-row">
+        <strong>E-mails aceitos</strong>
+        <span class="muted">${domains}</span>
+      </div>
+    </section>
+    <section class="rail-card">
+      <h2>Conta</h2>
+      <div class="rail-row">
+        <strong>${escapeHtml(roleLabel(state.me.role))}</strong>
+        <span class="muted">@${escapeHtml(state.me.username)}</span>
+      </div>
+      <div class="rail-row">
+        <button class="ghost-btn logout-btn" type="button" data-logout><span class="btn-icon">${logoutIconHtml()}</span><span>Sair</span></button>
+      </div>
+    </section>
+  `;
+}
+
+
+// Carrega o feed recomendado e conecta o compositor de novas publicacoes.
+async function loadHome() {
+  setMain(`
+    <div class="view-header"><h1>Inicio</h1><button class="ghost-btn" data-refresh>Atualizar</button></div>
+    ${composerHtml()}
+    <section id="feed-list"><div class="loading">Carregando feed...</div></section>
+  `);
+  attachComposer(null, () => loadHome());
+  document.querySelector('[data-refresh]')?.addEventListener('click', () => loadHome());
+
+  const data = await api('/api/feed');
+  const list = document.querySelector('#feed-list');
+  list.innerHTML = data.posts.length ? data.posts.map(postHtml).join('') : `<div class="empty">Nada publicado ainda.</div>`;
+  attachPostActions(list);
+}
+
+
+// Carrega uma conversa especifica e permite responder ao post raiz.
+async function loadThread(postId) {
+  if (!postId) {
+    await go('home');
+    return;
+  }
+  setMain(`
+    <div class="view-header">
+      <button class="ghost-btn" data-back>Voltar</button>
+      <h1>Conversa</h1>
+      <span></span>
+    </div>
+    <section id="thread-list"><div class="loading">Carregando conversa...</div></section>
+    ${composerHtml(postId, 'Responder')}
+  `);
+  document.querySelector('[data-back]')?.addEventListener('click', () => go('home'));
+  attachComposer(postId, () => loadThread(postId));
+
+  const data = await api(`/api/posts/${postId}/thread`);
+  const list = document.querySelector('#thread-list');
+  list.innerHTML = data.posts.length ? data.posts.map(postHtml).join('') : `<div class="empty">Conversa nao encontrada.</div>`;
+  attachPostActions(list);
+}
+
+
+// Tela de busca por pessoas e publicacoes.
+async function loadSearch(query) {
+  setMain(`
+    <div class="view-header"><h1>Busca</h1></div>
+    <form class="search-box" id="search-form">
+      <input name="q" value="${escapeAttr(query)}" placeholder="Buscar pessoas e publicacoes" autocomplete="off">
+    </form>
+    <section id="search-results">${query ? '<div class="loading">Buscando...</div>' : '<div class="empty">Digite pelo menos 2 caracteres.</div>'}</section>
+  `);
+
+  document.querySelector('#search-form').addEventListener('submit', (event) => {
+    event.preventDefault();
+    const q = new FormData(event.currentTarget).get('q');
+    go('search', { q });
+  });
+
+  if (!query || query.length < 2) return;
+
+  const data = await api(`/api/search?q=${encodeURIComponent(query)}`);
+  const results = document.querySelector('#search-results');
+  results.innerHTML = `
+    <h2 class="section-title">Pessoas</h2>
+    ${data.users.length ? data.users.map(userCardHtml).join('') : '<div class="empty">Nenhuma pessoa encontrada.</div>'}
+    <h2 class="section-title">Publicacoes</h2>
+    ${data.posts.length ? data.posts.map(postHtml).join('') : '<div class="empty">Nenhuma publicacao encontrada.</div>'}
+  `;
+  attachUserActions(results);
+  attachPostActions(results);
+}
+
+
+// Mostra notificacoes e marca tudo como lido quando a tela abre.
+async function loadNotifications() {
+  setMain(`
+    <div class="view-header">
+      <h1>Notificacoes</h1>
+      <button class="ghost-btn" data-read-all>Lidas</button>
+    </div>
+    <section id="notifications-list"><div class="loading">Carregando notificacoes...</div></section>
+  `);
+
+  document.querySelector('[data-read-all]')?.addEventListener('click', async () => {
+    await api('/api/notifications/read', { method: 'POST', body: {} });
+    await refreshUnreadCounts();
+    await loadNotifications();
+  });
+
+  const data = await api('/api/notifications');
+  const list = document.querySelector('#notifications-list');
+  list.innerHTML = data.notifications.length ? data.notifications.map((notification) => `
+    <article class="notice-card">
+      <div class="message-top">
+        <strong>${escapeHtml(notification.body)}</strong>
+        ${notification.readAt ? '' : '<span class="role teacher">novo</span>'}
+      </div>
+      <div class="muted">${formatTime(notification.createdAt)}</div>
+    </article>
+  `).join('') : '<div class="empty">Sem notificacoes.</div>';
+}
+
+
+// Perfil publico: capa, foto, bio, seguir/mensagem e posts do usuario.
+async function loadProfile(username) {
+  setMain(`
+    <div class="view-header"><h1>Perfil</h1></div>
+    <section id="profile-view"><div class="loading">Carregando perfil...</div></section>
+  `);
+
+  const data = await api(`/api/users/${encodeURIComponent(username)}`);
+  const profile = document.querySelector('#profile-view');
+  const user = data.user;
+  const mine = user.id === state.me.id;
+  profile.innerHTML = `
+    <div class="profile-banner"${user.bannerUrl ? ` style="background-image:url('${escapeAttr(mediaUrl(user.bannerUrl))}');background-size:cover;background-position:center"` : ''}></div>
+    <div class="profile-head">
+      <div class="profile-actions">
+        ${mine ? `
+          <button class="ghost-btn" data-upload-profile-image="avatar">Trocar foto</button>
+          <button class="ghost-btn" data-upload-profile-image="banner">Trocar capa</button>
+          <button class="primary-btn" data-edit-profile>Editar perfil</button>
+          <button class="ghost-btn icon-only logout-icon-btn" type="button" data-logout title="Sair" aria-label="Sair">${logoutIconHtml()}</button>
+        ` : `
+          <button class="ghost-btn" data-dm-user="${user.id}">Mensagem</button>
+          <button class="primary-btn" data-follow-user="${user.id}" data-followed="${user.followedByMe ? '1' : '0'}">${user.followedByMe ? 'Seguindo' : 'Seguir'}</button>
+        `}
+      </div>
+      ${avatarHtml(user, 'profile-avatar')}
+      <h2 class="profile-name">${escapeHtml(user.displayName)}</h2>
+      <div class="username">@${escapeHtml(user.username)} <span class="role ${escapeAttr(user.role)}">${escapeHtml(roleLabel(user.role))}</span></div>
+      <p class="profile-bio">${escapeHtml(user.bio || '')}</p>
+      <div class="profile-stats">
+        <span><strong>${user.followingCount}</strong> seguindo</span>
+        <span><strong>${user.followerCount}</strong> seguidores</span>
+      </div>
+    </div>
+    <h2 class="section-title">Publicacoes</h2>
+    <section>${data.posts.length ? data.posts.map(postHtml).join('') : '<div class="empty">Sem publicacoes.</div>'}</section>
+  `;
+
+  attachUserActions(profile);
+  attachPostActions(profile);
+  bindLogoutButtons(profile);
+  document.querySelector('[data-edit-profile]')?.addEventListener('click', editProfile);
+  document.querySelectorAll('[data-upload-profile-image]').forEach((button) => {
+    button.addEventListener('click', () => chooseProfileImage(button.dataset.uploadProfileImage));
+  });
+}
+
+
+// Tela de mensagens privadas com lista de conversas e painel de conversa.
+async function loadMessages(userId) {
+  setMain(`
+    <div class="view-header"><h1>Mensagens</h1></div>
+    <section class="two-pane">
+      <aside class="pane-list">
+        <form class="search-box" id="message-search">
+          <input name="q" placeholder="Buscar pessoa" autocomplete="off">
+        </form>
+        <div id="conversation-list"><div class="loading">Carregando...</div></div>
+      </aside>
+      <section id="message-panel"><div class="empty">Selecione uma conversa.</div></section>
+    </section>
+  `);
+
+  document.querySelector('#message-search').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const q = new FormData(event.currentTarget).get('q');
+    const data = await api(`/api/users?q=${encodeURIComponent(q)}`);
+    document.querySelector('#conversation-list').innerHTML = data.users.length
+      ? data.users.map((user) => conversationButtonHtml(user, '', Number(userId) === user.id)).join('')
+      : '<div class="empty">Nenhuma pessoa encontrada.</div>';
+    attachConversationButtons();
+  });
+
+  const conversations = await api('/api/messages/conversations');
+  const list = document.querySelector('#conversation-list');
+  list.innerHTML = conversations.conversations.length
+    ? conversations.conversations.map((item) => conversationButtonHtml(item.user, item.lastMessage.body, Number(userId) === item.user.id, item.unread)).join('')
+    : '<div class="empty">Sem conversas.</div>';
+  attachConversationButtons();
+
+  if (userId) await renderMessageThread(userId);
+}
+
+
+// Renderiza o historico com uma pessoa e liga o formulario de envio.
+async function renderMessageThread(userId) {
+  const data = await api(`/api/messages/${userId}`);
+  await refreshUnreadCounts();
+  const panel = document.querySelector('#message-panel');
+  panel.innerHTML = `
+    <div class="view-header message-head">
+      <h1>${escapeHtml(data.user.displayName)}</h1>
+      <div class="message-head-actions">
+        <button class="ghost-btn" data-profile="${escapeAttr(data.user.username)}">@${escapeHtml(data.user.username)}</button>
+        <button class="primary-btn" type="button" data-start-voice="${data.user.id}">Ligar</button>
+      </div>
+    </div>
+    <div class="message-thread" id="message-thread">
+      ${data.messages.length ? data.messages.map((message) => `
+        <div class="bubble ${message.mine ? 'mine' : ''}">
+          ${escapeHtml(message.body)}
+          <div class="time">${formatTime(message.createdAt)}</div>
+        </div>
+      `).join('') : '<div class="empty">Comece a conversa.</div>'}
+    </div>
+    <form class="message-form" id="message-form">
+      <textarea name="body" placeholder="Mensagem" maxlength="1000" required></textarea>
+      <button class="primary-btn">Enviar</button>
+    </form>
+  `;
+  document.querySelector('#message-thread')?.scrollTo(0, 999999);
+  document.querySelector('[data-profile]')?.addEventListener('click', (event) => go('profile', { username: event.currentTarget.dataset.profile }));
+  document.querySelector('[data-start-voice]')?.addEventListener('click', (event) => startVoiceCall(event.currentTarget.dataset.startVoice));
+  document.querySelector('#message-form').addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const body = new FormData(event.currentTarget).get('body');
+    await api('/api/messages', { method: 'POST', body: { recipientId: Number(userId), body } });
+    await loadMessages(userId);
+  });
+}
+
+// Inicia uma chamada de voz para a pessoa aberta na conversa.
+async function startVoiceCall(peerId) {
+  const problem = voiceSupportProblem();
+  if (problem) {
+    showToast(problem);
+    return;
+  }
+  if (voiceState.call) {
+    showToast('Ja existe uma chamada em andamento.');
+    return;
+  }
+
+  let createdCall = null;
+  voiceState.isBusy = true;
+  voiceState.statusText = 'Abrindo microfone...';
+  try {
+    const data = await api('/api/calls', { method: 'POST', body: { recipientId: Number(peerId) } });
+    createdCall = data.call;
+    await prepareVoiceConnection(createdCall, true);
+    const offer = await voiceState.pc.createOffer({ offerToReceiveAudio: true });
+    await voiceState.pc.setLocalDescription(offer);
+    await sendVoiceSignal('offer', voiceState.pc.localDescription);
+    voiceState.isBusy = false;
+    voiceState.statusText = 'Chamando...';
+    renderVoiceCallPanel();
+    startVoiceSignalPolling();
+  } catch (error) {
+    if (createdCall?.id) await api(`/api/calls/${createdCall.id}/end`, { method: 'POST', body: {} }).catch(() => null);
+    cleanupVoiceCall();
+    showToast(friendlyVoiceError(error));
+  }
+}
+
+// Prepara microfone, conexao WebRTC e elemento de audio remoto.
+async function prepareVoiceConnection(call, isCaller) {
+  voiceState.call = call;
+  voiceState.peer = call.peer;
+  voiceState.isCaller = isCaller;
+  voiceState.pendingCandidates = [];
+  voiceState.signalCursor = 0;
+  voiceState.statusText = isCaller ? 'Chamando...' : 'Conectando...';
+
+  voiceState.localStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
+    video: false
+  });
+
+  const pc = new RTCPeerConnection(RTC_CONFIG);
+  voiceState.pc = pc;
+  voiceState.localStream.getTracks().forEach((track) => pc.addTrack(track, voiceState.localStream));
+
+  pc.addEventListener('icecandidate', (event) => {
+    if (event.candidate) sendVoiceSignal('candidate', event.candidate).catch(() => null);
+  });
+  pc.addEventListener('track', (event) => {
+    const audio = ensureRemoteAudio();
+    audio.srcObject = event.streams[0];
+    audio.play().catch(() => null);
+  });
+  pc.addEventListener('connectionstatechange', () => {
+    const label = {
+      connecting: 'Conectando...',
+      connected: 'Chamada ativa',
+      disconnected: 'Reconectando...',
+      failed: 'Falha na chamada',
+      closed: 'Chamada encerrada'
+    }[pc.connectionState];
+    if (label) {
+      voiceState.statusText = label;
+      renderVoiceCallPanel();
+    }
+    if (['failed', 'closed'].includes(pc.connectionState)) cleanupVoiceCall();
+  });
+
+  renderVoiceCallPanel();
+}
+
+// Atende uma chamada recebida e responde ao offer WebRTC do chamador.
+async function answerVoiceCall() {
+  const problem = voiceSupportProblem();
+  const call = voiceState.call;
+  if (!call || voiceState.isBusy) return;
+  if (problem) {
+    voiceState.statusText = problem;
+    renderVoiceCallPanel();
+    showToast(problem);
+    return;
+  }
+
+  voiceState.isBusy = true;
+  voiceState.statusText = 'Abrindo microfone...';
+  renderVoiceCallPanel();
+  stopVoiceSignalPolling();
+
+  try {
+    await prepareVoiceConnection(call, false);
+    const answered = await api(`/api/calls/${call.id}/answer`, { method: 'POST', body: {} });
+    voiceState.call = answered.call;
+    voiceState.peer = answered.call.peer;
+    const signals = await api(`/api/calls/${call.id}/signals?after=0`);
+    voiceState.signalCursor = signals.lastSignalId || 0;
+    for (const signal of signals.signals) await handleVoiceSignal(signal);
+    voiceState.isBusy = false;
+    voiceState.statusText = 'Conectando...';
+    renderVoiceCallPanel();
+    startVoiceSignalPolling();
+  } catch (error) {
+    resetVoiceConnection();
+    voiceState.isBusy = false;
+    voiceState.statusText = friendlyVoiceError(error);
+    renderVoiceCallPanel();
+    startVoiceSignalPolling();
+    showToast(voiceState.statusText);
+  }
+}
+
+// Recusa a chamada recebida antes de abrir o microfone.
+async function declineVoiceCall() {
+  const call = voiceState.call;
+  if (!call) return;
+  try {
+    await api(`/api/calls/${call.id}/decline`, { method: 'POST', body: {} });
+  } catch (error) {
+    showToast(error.message);
+  } finally {
+    cleanupVoiceCall();
+  }
+}
+
+// Encerra a chamada localmente e avisa o servidor quando ainda houver sessao.
+async function endVoiceCall(sendRequest = true) {
+  const call = voiceState.call;
+  if (sendRequest && call) {
+    await api(`/api/calls/${call.id}/end`, { method: 'POST', body: {} }).catch(() => null);
+  }
+  cleanupVoiceCall();
+}
+
+// Envia offer, answer ou candidate para o servidor entregar ao outro navegador.
+async function sendVoiceSignal(type, payload) {
+  if (!voiceState.call) return;
+  const safePayload = JSON.parse(JSON.stringify(payload || {}));
+  await api(`/api/calls/${voiceState.call.id}/signals`, { method: 'POST', body: { type, payload: safePayload } });
+}
+
+// Consulta sinais novos enquanto a chamada esta tocando ou ativa.
+function startVoiceSignalPolling() {
+  stopVoiceSignalPolling();
+  voiceState.signalPollTimer = setInterval(() => pollVoiceSignals().catch(() => null), VOICE_SIGNAL_POLL_MS);
+  pollVoiceSignals().catch(() => null);
+}
+
+function stopVoiceSignalPolling() {
+  if (voiceState.signalPollTimer) clearInterval(voiceState.signalPollTimer);
+  voiceState.signalPollTimer = null;
+}
+
+async function pollVoiceSignals() {
+  if (!voiceState.call || voiceState.pollingSignals || voiceState.isBusy) return;
+  voiceState.pollingSignals = true;
+  try {
+    const previousStatus = voiceState.call.status;
+    const data = await api(`/api/calls/${voiceState.call.id}/signals?after=${voiceState.signalCursor}`);
+    voiceState.call = data.call;
+    voiceState.peer = data.call.peer;
+    if (!['ringing', 'active'].includes(data.call.status)) {
+      showToast(voiceCallStatusLabel(data.call.status));
+      cleanupVoiceCall();
+      return;
+    }
+    voiceState.signalCursor = data.lastSignalId || voiceState.signalCursor;
+    for (const signal of data.signals) await handleVoiceSignal(signal);
+    if (data.call.status !== previousStatus || data.signals.length > 0) renderVoiceCallPanel();
+  } finally {
+    voiceState.pollingSignals = false;
+  }
+}
+
+// Aplica os sinais recebidos: offer cria answer, answer fecha negociacao, candidate ajuda a conectar.
+async function handleVoiceSignal(signal) {
+  if (!voiceState.pc) return;
+  if (signal.type === 'offer') {
+    if (voiceState.pc.signalingState !== 'stable') return;
+    await voiceState.pc.setRemoteDescription(new RTCSessionDescription(signal.payload));
+    await flushPendingVoiceCandidates();
+    const answer = await voiceState.pc.createAnswer();
+    await voiceState.pc.setLocalDescription(answer);
+    await sendVoiceSignal('answer', voiceState.pc.localDescription);
+    voiceState.statusText = 'Conectando...';
+  }
+  if (signal.type === 'answer') {
+    if (!voiceState.pc.currentRemoteDescription) {
+      await voiceState.pc.setRemoteDescription(new RTCSessionDescription(signal.payload));
+      await flushPendingVoiceCandidates();
+      voiceState.statusText = 'Conectando...';
+    }
+  }
+  if (signal.type === 'candidate') await addRemoteVoiceCandidate(signal.payload);
+}
+
+async function addRemoteVoiceCandidate(candidate) {
+  if (!candidate || !voiceState.pc) return;
+  if (!voiceState.pc.remoteDescription) {
+    voiceState.pendingCandidates.push(candidate);
+    return;
+  }
+  await voiceState.pc.addIceCandidate(new RTCIceCandidate(candidate)).catch(() => null);
+}
+
+async function flushPendingVoiceCandidates() {
+  const candidates = voiceState.pendingCandidates.splice(0);
+  for (const candidate of candidates) await addRemoteVoiceCandidate(candidate);
+}
+
+// Polling leve para descobrir chamadas recebidas mesmo quando a aba Mensagens nao esta aberta.
+function startVoicePolling() {
+  if (voiceState.incomingPollTimer) return;
+  pollIncomingVoiceCalls().catch(() => null);
+  voiceState.incomingPollTimer = setInterval(() => pollIncomingVoiceCalls().catch(() => null), VOICE_POLL_MS);
+}
+
+function stopVoicePolling() {
+  if (voiceState.incomingPollTimer) clearInterval(voiceState.incomingPollTimer);
+  voiceState.incomingPollTimer = null;
+}
+
+async function pollIncomingVoiceCalls() {
+  if (!state.me || voiceState.call) return;
+  const data = await api('/api/calls/active');
+  const incoming = data.calls.find((call) => call.incoming);
+  if (!incoming) return;
+  voiceState.call = incoming;
+  voiceState.peer = incoming.peer;
+  voiceState.statusText = 'Chamada recebida';
+  renderVoiceCallPanel();
+  startVoiceSignalPolling();
+}
+
+// Mostra o painel flutuante da chamada e conecta seus botoes.
+function renderVoiceCallPanel() {
+  let panel = document.querySelector('#voice-call-panel');
+  if (!voiceState.call) {
+    panel?.remove();
+    return;
+  }
+  if (!panel) {
+    document.body.insertAdjacentHTML('beforeend', '<section class="voice-call-panel" id="voice-call-panel" aria-live="polite"></section>');
+    panel = document.querySelector('#voice-call-panel');
+  }
+
+  const call = voiceState.call;
+  const incomingWaiting = call.incoming && !voiceState.pc;
+  const status = voiceState.statusText || voiceCallStatusLabel(call.status);
+  const disabled = voiceState.isBusy ? ' disabled' : '';
+  panel.innerHTML = `
+    <div class="voice-call-main">
+      ${avatarHtml(voiceState.peer || call.peer)}
+      <div>
+        <strong>${escapeHtml((voiceState.peer || call.peer).displayName)}</strong>
+        <span>${escapeHtml(status)}</span>
+      </div>
+    </div>
+    <div class="voice-call-actions">
+      ${incomingWaiting ? `
+        <button class="primary-btn" type="button" data-voice-action="answer"${disabled}>${voiceState.isBusy ? 'Atendendo...' : 'Atender'}</button>
+        <button class="danger-btn" type="button" data-voice-action="decline"${disabled}>Recusar</button>
+      ` : `
+        <button class="danger-btn" type="button" data-voice-action="end"${disabled}>Encerrar</button>
+      `}
+    </div>
+  `;
+
+  panel.querySelector('[data-voice-action="answer"]')?.addEventListener('click', answerVoiceCall);
+  panel.querySelector('[data-voice-action="decline"]')?.addEventListener('click', declineVoiceCall);
+  panel.querySelector('[data-voice-action="end"]')?.addEventListener('click', () => endVoiceCall(true));
+}
+
+function ensureRemoteAudio() {
+  if (!voiceState.remoteAudio) {
+    const audio = document.createElement('audio');
+    audio.id = 'voice-remote-audio';
+    audio.autoplay = true;
+    audio.playsInline = true;
+    document.body.append(audio);
+    voiceState.remoteAudio = audio;
+  }
+  return voiceState.remoteAudio;
+}
+
+function resetVoiceConnection() {
+  voiceState.pc?.close();
+  voiceState.localStream?.getTracks().forEach((track) => track.stop());
+  voiceState.remoteAudio?.remove();
+  voiceState.pc = null;
+  voiceState.localStream = null;
+  voiceState.remoteAudio = null;
+  voiceState.pendingCandidates = [];
+}
+
+function cleanupVoiceCall() {
+  stopVoiceSignalPolling();
+  resetVoiceConnection();
+  voiceState.call = null;
+  voiceState.peer = null;
+  voiceState.signalCursor = 0;
+  voiceState.pendingCandidates = [];
+  voiceState.pollingSignals = false;
+  voiceState.isBusy = false;
+  voiceState.statusText = '';
+  renderVoiceCallPanel();
+}
+
+function voiceSupportProblem() {
+  const host = window.location.hostname;
+  const localHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  if (!window.isSecureContext && !localHost) {
+    return 'O Edge suporta chamada de voz, mas bloqueia o microfone em HTTP pelo IP da rede. Use HTTPS ou teste em localhost.';
+  }
+  if (!window.RTCPeerConnection) {
+    return 'Este navegador nao tem WebRTC habilitado para chamada de voz.';
+  }
+  if (!navigator.mediaDevices?.getUserMedia) {
+    return 'O navegador nao liberou acesso ao microfone. Use HTTPS e confira a permissao do microfone.';
+  }
+  return '';
+}
+
+function friendlyVoiceError(error) {
+  const name = String(error?.name || '');
+  const message = String(error?.message || '');
+  if (name === 'NotAllowedError' || message.toLowerCase().includes('permission')) {
+    return 'Microfone bloqueado. Permita o microfone no navegador e tente atender novamente.';
+  }
+  if (name === 'NotFoundError' || message.toLowerCase().includes('requested device not found')) {
+    return 'Nenhum microfone foi encontrado neste dispositivo.';
+  }
+  if (message) return message;
+  return 'Nao foi possivel iniciar a chamada de voz.';
+}
+
+function voiceCallStatusLabel(status) {
+  return {
+    ringing: 'Chamando...',
+    active: 'Chamada ativa',
+    ended: 'Chamada encerrada',
+    declined: 'Chamada recusada',
+    missed: 'Chamada perdida'
+  }[status] || 'Chamada de voz';
+}
+
+// Painel da equipe: metricas, pedidos de exclusao, denuncias e usuarios.
+async function loadAdmin(tab) {
+  state.adminTab = tab;
+  setMain(`
+    <div class="view-header"><h1>Equipe</h1></div>
+    <nav class="admin-tabs">
+      ${['requests', 'reports', 'users'].map((item) => `<button class="tab ${tab === item ? 'active' : ''}" data-admin-tab="${item}">${adminTabLabel(item)}</button>`).join('')}
+    </nav>
+    <section id="admin-view"><div class="loading">Carregando painel...</div></section>
+  `);
+
+  document.querySelectorAll('[data-admin-tab]').forEach((button) => {
+    button.addEventListener('click', () => go('admin', { tab: button.dataset.adminTab }));
+  });
+
+  const overview = await api('/api/admin/overview');
+  const top = `
+    <div class="admin-grid">
+      <div class="metric"><strong>${overview.overview.users}</strong><span class="muted">usuarios</span></div>
+      <div class="metric"><strong>${overview.overview.posts}</strong><span class="muted">publicacoes</span></div>
+      <div class="metric"><strong>${overview.overview.openReports}</strong><span class="muted">denuncias</span></div>
+      <div class="metric"><strong>${overview.overview.pendingDeletionRequests}</strong><span class="muted">exclusoes</span></div>
+    </div>
+  `;
+
+  const view = document.querySelector('#admin-view');
+  if (tab === 'requests') {
+    const data = await api('/api/admin/deletion-requests');
+    view.innerHTML = top + (data.requests.length ? data.requests.map(deletionRequestHtml).join('') : '<div class="empty">Sem solicitacoes.</div>');
+  }
+  if (tab === 'reports') {
+    const data = await api('/api/admin/reports');
+    view.innerHTML = top + (data.reports.length ? data.reports.map(reportHtml).join('') : '<div class="empty">Sem denuncias.</div>');
+  }
+  if (tab === 'users') {
+    const data = await api('/api/admin/users');
+    view.innerHTML = top + (data.users.length ? data.users.map(adminUserHtml).join('') : '<div class="empty">Sem usuarios.</div>');
+  }
+
+  attachAdminActions(view);
+}
+
+
+// Liga botoes de sair criados no menu lateral, painel direito ou perfil.
+function bindLogoutButtons(scope = document) {
+  scope.querySelectorAll('[data-logout]').forEach((button) => {
+    if (button.dataset.logoutBound === '1') return;
+    button.dataset.logoutBound = '1';
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      logout().catch((error) => showToast(error.message));
+    });
+  });
+}
+
+
+// Substitui apenas a coluna central, preservando navegacao e painel lateral.
+function setMain(html) {
+  document.querySelector('#main').innerHTML = html;
+  bindLogoutButtons(document);
+}
+
+
+// HTML do compositor: texto, escolha de imagens, contador e botao de envio.
+function composerHtml(parentId = '', label = 'Publicar') {
+  return `
+    <form class="composer" id="composer" data-parent-id="${parentId || ''}">
+      ${avatarHtml(state.me)}
+      <div>
+        <textarea id="composer-body" name="body" maxlength="${state.config.maxPostLength}" placeholder="${parentId ? 'Escreva sua resposta' : 'O que esta acontecendo na escola?'}"></textarea>
+        <div class="composer-media-preview" id="composer-media-preview"></div>
+        <div class="composer-actions">
+          <div class="composer-tools">
+            <input class="visually-hidden" id="composer-images" type="file" accept="${IMAGE_ACCEPT}" multiple>
+            <button class="icon-btn media-picker-btn" id="composer-image-btn" type="button" title="Adicionar imagens" aria-label="Adicionar imagens">Imagem</button>
+          </div>
+          <div class="composer-submit">
+            <span class="char-count" id="char-count">0/${state.config.maxPostLength}</span>
+            <button class="primary-btn" type="submit">${label}</button>
+          </div>
+        </div>
+      </div>
+    </form>
+  `;
+}
+
+
+// Liga eventos do compositor: contador, preview, validacao de imagens e publicacao.
+function attachComposer(parentId, afterSubmit) {
+  const form = document.querySelector('#composer');
+  const textarea = document.querySelector('#composer-body');
+  const counter = document.querySelector('#char-count');
+  const imageInput = document.querySelector('#composer-images');
+  const imageButton = document.querySelector('#composer-image-btn');
+  const preview = document.querySelector('#composer-media-preview');
+  if (!form || !textarea) return;
+
+  let imageFiles = [];
+  let previewUrls = [];
+
+  const renderPreview = () => {
+    if (!preview) return;
+    previewUrls.forEach((url) => URL.revokeObjectURL(url));
+    previewUrls = imageFiles.map((file) => URL.createObjectURL(file));
+    preview.innerHTML = imageFiles.map((file, index) => `
+      <div class="composer-media-thumb">
+        <img src="${escapeAttr(previewUrls[index])}" alt="${escapeAttr(file.name || 'Imagem selecionada')}">
+        <button class="media-remove" type="button" data-remove-image="${index}" aria-label="Remover imagem">x</button>
+      </div>
+    `).join('');
+
+    preview.querySelectorAll('[data-remove-image]').forEach((button) => {
+      button.addEventListener('click', () => {
+        imageFiles = imageFiles.filter((_, index) => index !== Number(button.dataset.removeImage));
+        renderPreview();
+      });
+    });
+  };
+
+  const addImages = (files) => {
+    const selected = Array.from(files || []);
+    if (!selected.length) return;
+    if (imageFiles.length + selected.length > MAX_POST_IMAGES) {
+      throw new Error(`Escolha no maximo ${MAX_POST_IMAGES} imagens.`);
+    }
+    selected.forEach(validateImageFile);
+    imageFiles = imageFiles.concat(selected);
+    renderPreview();
+  };
+
+  textarea.addEventListener('input', () => {
+    counter.textContent = `${textarea.value.length}/${state.config.maxPostLength}`;
+  });
+
+  imageButton?.addEventListener('click', () => imageInput?.click());
+
+  imageInput?.addEventListener('change', () => {
+    try {
+      addImages(imageInput.files);
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      imageInput.value = '';
+    }
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const submitButton = form.querySelector('button[type="submit"]');
+    submitButton.disabled = true;
+    try {
+      const body = textarea.value;
+      const imageDataUrls = await Promise.all(imageFiles.map(fileToDataUrl));
+      await api('/api/posts', { method: 'POST', body: { body, parentId: parentId ? Number(parentId) : null, imageDataUrls } });
+      textarea.value = '';
+      imageFiles = [];
+      renderPreview();
+      counter.textContent = `0/${state.config.maxPostLength}`;
+      showToast(parentId ? 'Resposta publicada.' : 'Publicado.');
+      await afterSubmit();
+    } catch (error) {
+      showToast(error.message);
+    } finally {
+      submitButton.disabled = false;
+    }
+  });
+}
+
+
+// Card principal da timeline, incluindo repost, texto, imagens, moderacao e acoes.
+function postHtml(post) {
+  const targetId = post.repostOfId || post.id;
+  const canDeleteRequest = (post.author.id === state.me.id || isStaff()) && !post.moderation?.pendingDeletion;
+  const canAdminDeletePending = state.me.role === 'admin' && post.moderation?.pendingDeletion;
+  const moderationNotice = post.moderation?.pendingDeletion ? '<div class="moderation-line">Exclusao pendente: visivel somente para admin.</div>' : '';
+  const body = post.original
+    ? quoteHtml(post.original)
+    : `${post.body ? `<p class="post-body" data-open-post="${post.id}">${escapeHtml(post.body)}</p>` : ''}${postMediaHtml(post.media, post.id)}`;
+
+  return `
+    <article class="post-card" data-post-card="${post.id}">
+      ${avatarHtml(post.author)}
+      <div>
+        ${post.original ? `<div class="repost-line">${escapeHtml(post.author.displayName)} repostou</div>` : ''}
+        <div class="post-top">
+          <button class="name ghost-link" data-profile="${escapeAttr(post.author.username)}">${escapeHtml(post.author.displayName)}</button>
+          <span class="username">@${escapeHtml(post.author.username)}</span>
+          <span class="role ${escapeAttr(post.author.role)}">${escapeHtml(roleLabel(post.author.role))}</span>
+          <span class="time">${formatTime(post.createdAt)}</span>
+        </div>
+        ${body}
+        ${moderationNotice}
+        <div class="post-actions">
+          <button class="icon-btn" data-action="reply" data-id="${targetId}">Resp ${post.metrics.replies}</button>
+          <button class="icon-btn ${post.viewer.liked ? 'active-like' : ''}" data-action="like" data-id="${targetId}" data-active="${post.viewer.liked ? '1' : '0'}">Curtir ${post.metrics.likes}</button>
+          <button class="icon-btn ${post.viewer.reposted ? 'active-repost' : ''}" data-action="repost" data-id="${targetId}" data-active="${post.viewer.reposted ? '1' : '0'}">Repost ${post.metrics.reposts}</button>
+          ${canDeleteRequest ? `<button class="icon-btn" data-action="delete-request" data-id="${post.id}">Excluir</button>` : '<span></span>'}
+          <button class="icon-btn" data-action="report" data-id="${post.id}">Denunciar</button>
+          ${canAdminDeletePending ? `<button class="icon-btn admin-delete-post" data-action="admin-delete-pending" data-id="${targetId}" title="Excluir publicacao solicitada" aria-label="Excluir publicacao solicitada">${trashIconHtml()}</button>` : ''}
+        </div>
+      </div>
+    </article>
+  `;
+}
+
+
+// Versao compacta de um post quando ele aparece dentro de um repost.
+function quoteHtml(post) {
+  return `
+    <div class="quote-card" data-open-post="${post.id}">
+      <div class="post-top">
+        <strong>${escapeHtml(post.author.displayName)}</strong>
+        <span class="username">@${escapeHtml(post.author.username)}</span>
+        <span class="time">${formatTime(post.createdAt)}</span>
+      </div>
+      ${post.body ? `<p class="post-body">${escapeHtml(post.body)}</p>` : ''}
+      ${postMediaHtml(post.media, post.id)}
+    </div>
+  `;
+}
+
+
+// Grade responsiva das imagens anexadas a uma publicacao.
+function postMediaHtml(media = [], postId = '') {
+  if (!Array.isArray(media) || !media.length) return '';
+  const images = media.slice(0, MAX_POST_IMAGES);
+  return `
+    <div class="post-media-grid count-${images.length}" data-open-post="${postId}">
+      ${images.map((item) => `
+        <div class="post-media-item">
+          <img src="${escapeAttr(mediaUrl(item.url))}" alt="${escapeAttr(item.altText || 'Imagem da publicacao')}" loading="lazy">
+        </div>
+      `).join('')}
+    </div>
+  `;
+}
+
+
+// Liga botoes de responder, curtir, repostar, pedir exclusao e denunciar.
+function attachPostActions(scope) {
+  scope.querySelectorAll('[data-profile]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.stopPropagation();
+      go('profile', { username: button.dataset.profile });
+    });
+  });
+
+  scope.querySelectorAll('[data-open-post]').forEach((element) => {
+    element.addEventListener('click', () => go('thread', { id: element.dataset.openPost }));
+  });
+
+  scope.querySelectorAll('[data-action]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.id;
+      const action = button.dataset.action;
+      try {
+        if (action === 'reply') await go('thread', { id });
+        if (action === 'like') {
+          await api(`/api/posts/${id}/like`, { method: button.dataset.active === '1' ? 'DELETE' : 'POST', body: {} });
+          await reloadCurrent();
+        }
+        if (action === 'repost') {
+          await api(`/api/posts/${id}/repost`, { method: button.dataset.active === '1' ? 'DELETE' : 'POST', body: {} });
+          await reloadCurrent();
+        }
+        if (action === 'delete-request') {
+          const reason = prompt('Motivo da exclusao');
+          if (reason !== null) {
+            await api(`/api/posts/${id}/deletion-request`, { method: 'POST', body: { reason } });
+            showToast('Solicitacao enviada ao admin.');
+          }
+        }
+        if (action === 'admin-delete-pending') {
+          if (confirm('Excluir agora esta publicacao solicitada?')) {
+            await api(`/api/admin/posts/${id}/delete-request`, { method: 'POST', body: { adminNote: 'Excluido durante visualizacao pelo admin.' } });
+            showToast('Publicacao excluida.');
+            await reloadCurrent();
+          }
+        }
+        if (action === 'report') {
+          const details = prompt('Descreva o problema');
+          if (details !== null) {
+            await api(`/api/posts/${id}/report`, { method: 'POST', body: { reason: 'Denuncia', details } });
+            showToast('Denuncia enviada para revisao.');
+          }
+        }
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+}
+
+
+// Card de usuario usado em busca e listas.
+function userCardHtml(user) {
+  const mine = user.id === state.me.id;
+  return `
+    <article class="user-card">
+      ${avatarHtml(user)}
+      <div>
+        <button class="name ghost-link" data-profile="${escapeAttr(user.username)}">${escapeHtml(user.displayName)}</button>
+        <div class="username">@${escapeHtml(user.username)} <span class="role ${escapeAttr(user.role)}">${escapeHtml(roleLabel(user.role))}</span></div>
+        <div class="muted">${escapeHtml(user.bio || '')}</div>
+      </div>
+      <div class="inline-actions">
+        ${mine ? '' : `<button class="ghost-btn" data-dm-user="${user.id}">Mensagem</button>`}
+        ${mine ? '' : `<button class="primary-btn" data-follow-user="${user.id}" data-followed="${user.followedByMe ? '1' : '0'}">${user.followedByMe ? 'Seguindo' : 'Seguir'}</button>`}
+      </div>
+    </article>
+  `;
+}
+
+
+// Liga botoes de seguir e mensagem nos cards de usuario.
+function attachUserActions(scope) {
+  scope.querySelectorAll('[data-profile]').forEach((button) => {
+    button.addEventListener('click', () => go('profile', { username: button.dataset.profile }));
+  });
+  scope.querySelectorAll('[data-follow-user]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      try {
+        await api(`/api/users/${button.dataset.followUser}/follow`, { method: button.dataset.followed === '1' ? 'DELETE' : 'POST', body: {} });
+        await reloadCurrent();
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+  scope.querySelectorAll('[data-dm-user]').forEach((button) => {
+    button.addEventListener('click', () => go('messages', { userId: button.dataset.dmUser }));
+  });
+}
+
+
+// Botao de conversa na lista lateral de mensagens privadas.
+function conversationButtonHtml(user, lastMessage = '', active = false, unread = 0) {
+  return `
+    <button class="conversation ${active ? 'active' : ''}" data-conversation="${user.id}">
+      <div class="user-row">
+        ${avatarHtml(user)}
+        <div>
+          <strong>${escapeHtml(user.displayName)}</strong>
+          <div class="username">@${escapeHtml(user.username)}${unread ? ` · ${unread} nova(s)` : ''}</div>
+        </div>
+      </div>
+      ${lastMessage ? `<div class="muted">${escapeHtml(lastMessage)}</div>` : ''}
+    </button>
+  `;
+}
+
+
+// Navega para a conversa escolhida pelo usuario.
+function attachConversationButtons() {
+  document.querySelectorAll('[data-conversation]').forEach((button) => {
+    button.addEventListener('click', () => go('messages', { userId: button.dataset.conversation }));
+  });
+}
+
+
+// Linha do pedido de exclusao vista pelo administrador.
+function deletionRequestHtml(request) {
+  const pending = request.status === 'pending';
+  return `
+    <article class="admin-card">
+      <div class="message-top">
+        <strong>${escapeHtml(request.requester.displayName)}</strong>
+        <span class="muted">pediu exclusao</span>
+        <span class="role">${escapeHtml(request.status)}</span>
+      </div>
+      <p class="post-body">${escapeHtml(request.reason)}</p>
+      <div class="quote-card">
+        <strong>${escapeHtml(request.post.author.displayName)}</strong>
+        <p class="post-body">${escapeHtml(request.post.body)}</p>
+      </div>
+      ${state.me.role === 'admin' && pending ? `
+        <div class="admin-actions">
+          <button class="primary-btn" data-admin-action="approve-delete" data-id="${request.id}">Aprovar</button>
+          <button class="danger-btn" data-admin-action="reject-delete" data-id="${request.id}">Rejeitar</button>
+        </div>
+      ` : ''}
+    </article>
+  `;
+}
+
+
+// Linha de denuncia vista por professor/admin.
+function reportHtml(report) {
+  return `
+    <article class="admin-card">
+      <div class="message-top">
+        <strong>${escapeHtml(report.reporter.displayName)}</strong>
+        <span class="muted">${escapeHtml(report.reason)}</span>
+        <span class="role">${escapeHtml(report.status)}</span>
+      </div>
+      <p class="post-body">${escapeHtml(report.details || '')}</p>
+      <div class="quote-card">
+        <strong>${escapeHtml(report.post.author.displayName)}</strong>
+        <p class="post-body">${escapeHtml(report.post.body)}</p>
+      </div>
+      <div class="admin-actions">
+        <button class="ghost-btn" data-admin-action="review-report" data-status="reviewed" data-id="${report.id}">Revisada</button>
+        <button class="ghost-btn" data-admin-action="review-report" data-status="dismissed" data-id="${report.id}">Descartar</button>
+      </div>
+    </article>
+  `;
+}
+
+
+// Linha de usuario no painel da equipe, com papel e suspensao.
+function adminUserHtml(user) {
+  const canEdit = state.me.role === 'admin' && user.id !== state.me.id;
+  return `
+    <article class="admin-card">
+      <div class="user-row">
+        ${avatarHtml(user)}
+        <div>
+          <strong>${escapeHtml(user.displayName)}</strong>
+          <div class="username">@${escapeHtml(user.username)} · ${escapeHtml(user.email)}</div>
+          <div class="muted">${user.postCount} publicacoes · ${user.followerCount} seguidores</div>
+        </div>
+      </div>
+      <div class="admin-actions">
+        ${canEdit ? `
+          <select data-role-user="${user.id}">
+            ${['student', 'teacher', 'admin'].map((role) => `<option value="${role}" ${role === user.role ? 'selected' : ''}>${roleLabel(role)}</option>`).join('')}
+          </select>
+          <button class="ghost-btn" data-admin-action="suspend-user" data-id="${user.id}" data-suspended="${user.suspendedAt ? '1' : '0'}">${user.suspendedAt ? 'Reativar' : 'Suspender'}</button>
+        ` : `<span class="role ${escapeAttr(user.role)}">${escapeHtml(roleLabel(user.role))}</span>`}
+      </div>
+    </article>
+  `;
+}
+
+
+// Liga acoes administrativas: aprovar/rejeitar exclusao, revisar denuncia e alterar usuarios.
+function attachAdminActions(scope) {
+  scope.querySelectorAll('[data-admin-action]').forEach((button) => {
+    button.addEventListener('click', async () => {
+      const id = button.dataset.id;
+      const action = button.dataset.adminAction;
+      try {
+        if (action === 'approve-delete' || action === 'reject-delete') {
+          const adminNote = prompt('Nota do admin') || '';
+          await api(`/api/admin/deletion-requests/${id}`, {
+            method: 'PATCH',
+            body: { status: action === 'approve-delete' ? 'approved' : 'rejected', adminNote }
+          });
+        }
+        if (action === 'review-report') {
+          await api(`/api/admin/reports/${id}`, { method: 'PATCH', body: { status: button.dataset.status } });
+        }
+        if (action === 'suspend-user') {
+          await api(`/api/admin/users/${id}`, { method: 'PATCH', body: { suspended: button.dataset.suspended !== '1' } });
+        }
+        await loadAdmin(state.adminTab);
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+
+  scope.querySelectorAll('[data-role-user]').forEach((select) => {
+    select.addEventListener('change', async () => {
+      try {
+        await api(`/api/admin/users/${select.dataset.roleUser}`, { method: 'PATCH', body: { role: select.value } });
+        showToast('Papel atualizado.');
+      } catch (error) {
+        showToast(error.message);
+      }
+    });
+  });
+}
+
+
+// Atalho para trocar foto ou capa diretamente pelo perfil.
+async function chooseProfileImage(kind) {
+  const input = document.createElement('input');
+  input.type = 'file';
+  input.accept = IMAGE_ACCEPT;
+
+  input.addEventListener('change', async () => {
+    const file = input.files?.[0];
+    if (!file) return;
+
+    try {
+      const dataUrl = await fileToDataUrl(file);
+      const payload = kind === 'banner' ? { bannerDataUrl: dataUrl } : { avatarDataUrl: dataUrl };
+      const result = await api('/api/me', { method: 'PATCH', body: payload });
+      state.me = result.user;
+      showToast(kind === 'banner' ? 'Capa atualizada.' : 'Foto atualizada.');
+      await go('profile', { username: state.me.username });
+    } catch (error) {
+      showToast(error.message);
+    }
+  }, { once: true });
+
+  input.click();
+}
+
+
+// Modal completo de edicao de perfil, incluindo remocao e troca de imagens.
+async function editProfile() {
+  document.querySelector('#profile-editor-modal')?.remove();
+  document.body.insertAdjacentHTML('beforeend', `
+    <div class="modal-backdrop" id="profile-editor-modal" role="dialog" aria-modal="true" aria-label="Editar perfil">
+      <form class="profile-editor" id="profile-editor-form">
+        <div class="modal-head">
+          <button class="ghost-btn" type="button" data-close-profile-editor>Cancelar</button>
+          <h2>Editar perfil</h2>
+          <button class="primary-btn" type="submit">Salvar</button>
+        </div>
+        <div class="field">
+          <label for="edit-display-name">Nome</label>
+          <input id="edit-display-name" name="displayName" value="${escapeAttr(state.me.displayName)}" maxlength="60" required>
+        </div>
+        <div class="field">
+          <label for="edit-bio">Bio</label>
+          <textarea id="edit-bio" name="bio" maxlength="240" rows="4">${escapeHtml(state.me.bio || '')}</textarea>
+        </div>
+        <div class="editor-grid">
+          <div class="image-field">
+            <span class="field-label">Foto do perfil</span>
+            <div class="image-preview avatar-preview" id="avatar-preview">
+              ${state.me.avatarUrl ? `<img src="${escapeAttr(mediaUrl(state.me.avatarUrl))}" alt="">` : `<span>${escapeHtml(initialsFor(state.me))}</span>`}
+            </div>
+            <input id="avatar-file" name="avatarFile" type="file" accept="${IMAGE_ACCEPT}">
+            <label class="checkbox-row"><input type="checkbox" name="removeAvatar"> Remover foto</label>
+          </div>
+          <div class="image-field">
+            <span class="field-label">Capa do perfil</span>
+            <div class="image-preview banner-preview" id="banner-preview"${state.me.bannerUrl ? ` style="background-image:url('${escapeAttr(mediaUrl(state.me.bannerUrl))}')"` : ''}>
+              ${state.me.bannerUrl ? '' : '<span>Capa</span>'}
+            </div>
+            <input id="banner-file" name="bannerFile" type="file" accept="${IMAGE_ACCEPT}">
+            <label class="checkbox-row"><input type="checkbox" name="removeBanner"> Remover capa</label>
+          </div>
+        </div>
+      </form>
+    </div>
+  `);
+
+  const modal = document.querySelector('#profile-editor-modal');
+  const form = document.querySelector('#profile-editor-form');
+  const avatarInput = document.querySelector('#avatar-file');
+  const bannerInput = document.querySelector('#banner-file');
+  const avatarPreview = document.querySelector('#avatar-preview');
+  const bannerPreview = document.querySelector('#banner-preview');
+
+  modal.addEventListener('click', (event) => {
+    if (event.target === modal) modal.remove();
+  });
+  document.querySelector('[data-close-profile-editor]').addEventListener('click', () => modal.remove());
+
+  avatarInput.addEventListener('change', async () => {
+    await updateImagePreview(avatarInput.files[0], avatarPreview, 'avatar');
+  });
+  bannerInput.addEventListener('change', async () => {
+    await updateImagePreview(bannerInput.files[0], bannerPreview, 'banner');
+  });
+
+  form.addEventListener('submit', async (event) => {
+    event.preventDefault();
+    const formData = new FormData(form);
+    const avatarFile = avatarInput.files[0] || null;
+    const bannerFile = bannerInput.files[0] || null;
+
+    try {
+      const payload = {
+        displayName: formData.get('displayName'),
+        bio: formData.get('bio'),
+        removeAvatar: formData.get('removeAvatar') === 'on',
+        removeBanner: formData.get('removeBanner') === 'on'
+      };
+      if (avatarFile) payload.avatarDataUrl = await fileToDataUrl(avatarFile);
+      if (bannerFile) payload.bannerDataUrl = await fileToDataUrl(bannerFile);
+
+      const result = await api('/api/me', { method: 'PATCH', body: payload });
+      state.me = result.user;
+      modal.remove();
+      showToast('Perfil atualizado.');
+      await go('profile', { username: state.me.username });
+    } catch (error) {
+      showToast(error.message);
+    }
+  });
+}
+
+
+// Mostra uma pre-visualizacao local antes de enviar foto ou capa ao servidor.
+async function updateImagePreview(file, preview, kind) {
+  if (!file) return;
+  const dataUrl = await fileToDataUrl(file);
+  if (kind === 'avatar') {
+    preview.innerHTML = `<img src="${escapeAttr(dataUrl)}" alt="">`;
+  } else {
+    preview.style.backgroundImage = `url('${dataUrl}')`;
+    preview.innerHTML = '';
+  }
+}
+
+
+// Converte arquivo local em Data URL para enviar dentro do JSON da API.
+function fileToDataUrl(file) {
+  validateImageFile(file);
+
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.addEventListener('load', () => resolve(reader.result));
+    reader.addEventListener('error', () => reject(new Error('Nao foi possivel ler a imagem.')));
+    reader.readAsDataURL(file);
+  });
+}
+
+
+// Regras do navegador para imagens: formato permitido e ate 4 MB.
+function validateImageFile(file) {
+  const allowed = IMAGE_ACCEPT.split(',');
+  if (!file || !allowed.includes(file.type)) throw new Error('Use PNG, JPG, WebP ou GIF.');
+  if (file.size > MAX_IMAGE_BYTES) throw new Error('A imagem deve ter ate 4 MB.');
+  return file;
+}
+
+
+// Recarrega a tela atual depois de uma acao que muda dados no servidor.
+async function reloadCurrent() {
+  await go(state.view, state.params);
+}
+
+
+// Encerra sessao no servidor e volta para a tela de login.
+async function logout() {
+  await endVoiceCall(true);
+  stopVoicePolling();
+  stopUnreadPolling();
+  await api('/api/auth/logout', { method: 'POST', body: {} });
+  state.me = null;
+  state.unreadCounts = { notifications: 0, messages: 0 };
+  renderAuth('login');
+}
+
+
+// Titulo mostrado no cabecalho de cada tela.
+function viewTitle() {
+  return {
+    home: 'Inicio',
+    search: 'Busca',
+    notifications: 'Notificacoes',
+    messages: 'Mensagens',
+    profile: 'Perfil',
+    thread: 'Conversa',
+    admin: 'Equipe'
+  }[state.view] || 'SIX';
+}
+
+
+// Nome amigavel das abas administrativas.
+function adminTabLabel(tab) {
+  return {
+    requests: 'Exclusoes',
+    reports: 'Denuncias',
+    users: 'Usuarios'
+  }[tab] || tab;
+}
+
+
+// Traduz os papeis internos para texto em portugues.
+function roleLabel(role) {
+  return {
+    student: 'Aluno',
+    teacher: 'Professor',
+    admin: 'Admin'
+  }[role] || role;
+}
+
+
+// A interface usa este helper para mostrar ou esconder itens da equipe.
+function isStaff() {
+  return state.me && ['teacher', 'admin'].includes(state.me.role);
+}
+
+
+// Gera iniciais quando o usuario ainda nao possui foto.
+function initialsFor(user) {
+  return String(user.displayName || user.username || 'S')
+    .split(/\s+/)
+    .slice(0, 2)
+    .map((part) => part[0])
+    .join('')
+    .toUpperCase() || 'S';
+}
+
+
+// Renderiza avatar com imagem enviada ou iniciais geradas.
+function avatarHtml(user, extraClass = '') {
+  const initials = initialsFor(user);
+  const cls = `avatar ${extraClass}`.trim();
+  if (user.avatarUrl) return `<span class="${cls}"><img src="${escapeAttr(mediaUrl(user.avatarUrl))}" alt=""></span>`;
+  return `<span class="${cls}">${escapeHtml(initials || 'S')}</span>`;
+}
+
+
+// Transforma datas ISO em tempo relativo, como 'ha 2 minutos'.
+function formatTime(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  const delta = Math.round((date.getTime() - Date.now()) / 1000);
+  const abs = Math.abs(delta);
+  const formatter = new Intl.RelativeTimeFormat('pt-BR', { numeric: 'auto' });
+  if (abs < 60) return formatter.format(delta, 'second');
+  if (abs < 3600) return formatter.format(Math.round(delta / 60), 'minute');
+  if (abs < 86400) return formatter.format(Math.round(delta / 3600), 'hour');
+  if (abs < 604800) return formatter.format(Math.round(delta / 86400), 'day');
+  return date.toLocaleDateString('pt-BR');
+}
+
+
+// Mostra avisos temporarios no canto da tela.
+function showToast(message) {
+  toast.textContent = message;
+  toast.classList.add('show');
+  clearTimeout(showToast.timer);
+  showToast.timer = setTimeout(() => toast.classList.remove('show'), 3200);
+}
+
+
+// Escapa texto do usuario antes de colocar no HTML, prevenindo injecao de codigo.
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+}
+
+
+// Escapa valores usados dentro de atributos HTML.
+function escapeAttr(value) {
+  return escapeHtml(value).replaceAll('`', '&#96;');
+}

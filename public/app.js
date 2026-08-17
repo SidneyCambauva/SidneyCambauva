@@ -10,6 +10,11 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 const VOICE_POLL_MS = 4000;
 const VOICE_SIGNAL_POLL_MS = 1200;
 const UNREAD_POLL_MS = 8000;
+const CALL_RING_INTERVAL_MS = 3600;
+const CALL_RING_BURST_SECONDS = 1.15;
+const CALL_NOTIFICATION_TAG = 'six-incoming-call';
+const PORTRAIT_VIDEO_WIDTH = 720;
+const PORTRAIT_VIDEO_HEIGHT = 1280;
 
 
 // Monta URLs corretamente tanto na raiz quanto publicado em subpasta, como /xis/.
@@ -53,6 +58,10 @@ const voiceState = {
   peer: null,
   pc: null,
   localStream: null,
+  sourceStream: null,
+  portraitVideo: null,
+  portraitCanvas: null,
+  portraitFrame: null,
   remoteStream: null,
   remoteAudio: null,
   kind: 'audio',
@@ -64,6 +73,14 @@ const voiceState = {
   isBusy: false,
   isCaller: false,
   statusText: ''
+};
+// Estado dos alertas locais de chamada: notificacao do sistema e toque do navegador.
+const callAlertState = {
+  audioContext: null,
+  ringTimer: null,
+  activeNotification: null,
+  lastCallId: null,
+  setup: false
 };
 
 init().catch((error) => {
@@ -79,6 +96,7 @@ async function init() {
   state.me = me.user;
   document.title = state.config.platformName;
   if (state.me) {
+    setupDeviceCallAlerts();
     await refreshUnreadCounts(false);
     await go('home');
     startVoicePolling();
@@ -168,6 +186,9 @@ function renderAuth(mode) {
 
   document.querySelector('#auth-form').addEventListener('submit', async (event) => {
     event.preventDefault();
+    setupDeviceCallAlerts();
+    primeCallAlertAudio();
+    requestCallNotificationPermission();
     const form = new FormData(event.currentTarget);
     try {
       const endpoint = mode === 'register' ? '/api/auth/register' : '/api/auth/login';
@@ -629,10 +650,12 @@ async function prepareVoiceConnection(call, isCaller, requestedKind = 'audio') {
   voiceState.signalCursor = 0;
   voiceState.statusText = isCaller ? 'Chamando...' : 'Conectando...';
 
-  voiceState.localStream = await navigator.mediaDevices.getUserMedia({
+  const sourceStream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    video: kind === 'video' ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } : false
+    video: kind === 'video' ? { width: { ideal: PORTRAIT_VIDEO_WIDTH }, height: { ideal: PORTRAIT_VIDEO_HEIGHT }, aspectRatio: { ideal: 9 / 16 }, facingMode: 'user' } : false
   });
+  voiceState.sourceStream = sourceStream;
+  voiceState.localStream = kind === 'video' ? createPortraitVideoStream(sourceStream) : sourceStream;
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
   voiceState.pc = pc;
@@ -674,6 +697,7 @@ async function answerVoiceCall() {
   const kind = currentCallKind();
   const problem = voiceSupportProblem(kind);
   if (!call || voiceState.isBusy) return;
+  stopIncomingCallAlert();
   if (problem) {
     voiceState.statusText = problem;
     renderVoiceCallPanel();
@@ -712,6 +736,7 @@ async function answerVoiceCall() {
 async function declineVoiceCall() {
   const call = voiceState.call;
   if (!call) return;
+  stopIncomingCallAlert();
   try {
     await api(`/api/calls/${call.id}/decline`, { method: 'POST', body: {} });
   } catch (error) {
@@ -724,6 +749,7 @@ async function declineVoiceCall() {
 // Encerra a chamada localmente e avisa o servidor quando ainda houver sessao.
 async function endVoiceCall(sendRequest = true) {
   const call = voiceState.call;
+  stopIncomingCallAlert();
   if (sendRequest && call) {
     await api(`/api/calls/${call.id}/end`, { method: 'POST', body: {} }).catch(() => null);
   }
@@ -817,6 +843,126 @@ function stopVoicePolling() {
   if (voiceState.incomingPollTimer) clearInterval(voiceState.incomingPollTimer);
   voiceState.incomingPollTimer = null;
 }
+// Prepara o navegador para tocar e mostrar notificacoes de chamadas recebidas.
+function setupDeviceCallAlerts() {
+  if (callAlertState.setup) return;
+  callAlertState.setup = true;
+  const enableAlerts = () => {
+    primeCallAlertAudio();
+    requestCallNotificationPermission();
+  };
+  document.addEventListener('pointerdown', enableAlerts, { once: true, passive: true });
+  document.addEventListener('keydown', enableAlerts, { once: true });
+}
+
+function requestCallNotificationPermission() {
+  if (!('Notification' in window) || Notification.permission !== 'default') return;
+  if (!window.isSecureContext && !isLocalBrowserHost()) return;
+  const permissionRequest = Notification.requestPermission();
+  if (permissionRequest?.catch) permissionRequest.catch(() => null);
+}
+
+function isLocalBrowserHost() {
+  const host = window.location.hostname;
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
+}
+
+function ensureCallAudioContext() {
+  const AudioContextClass = window.AudioContext || window.webkitAudioContext;
+  if (!AudioContextClass) return null;
+  if (!callAlertState.audioContext) callAlertState.audioContext = new AudioContextClass();
+  return callAlertState.audioContext;
+}
+
+function primeCallAlertAudio() {
+  const context = ensureCallAudioContext();
+  if (!context || context.state !== 'suspended') return;
+  context.resume().catch(() => null);
+}
+
+function startIncomingCallAlert(call) {
+  if (!call?.incoming) return;
+  if (callAlertState.lastCallId === call.id && callAlertState.ringTimer) return;
+  stopIncomingCallAlert();
+  callAlertState.lastCallId = call.id;
+  showIncomingCallNotification(call);
+  playIncomingCallRing();
+  callAlertState.ringTimer = setInterval(playIncomingCallRing, CALL_RING_INTERVAL_MS);
+}
+
+function stopIncomingCallAlert() {
+  if (callAlertState.ringTimer) clearInterval(callAlertState.ringTimer);
+  callAlertState.ringTimer = null;
+  callAlertState.lastCallId = null;
+  callAlertState.activeNotification?.close();
+  callAlertState.activeNotification = null;
+}
+
+function showIncomingCallNotification(call) {
+  if (!('Notification' in window) || Notification.permission !== 'granted') return;
+  if (!window.isSecureContext && !isLocalBrowserHost()) return;
+  const peerName = call.peer?.displayName || 'Usuario';
+  const mediaLabel = (call.kind || 'audio') === 'video' ? 'video' : 'voz';
+  callAlertState.activeNotification?.close();
+  const notification = new Notification(`${state.config?.platformName || 'SIX'} - chamada de ${mediaLabel}`, {
+    body: `${peerName} esta chamando voce.`,
+    icon: appPath('/assets/logo.svg'),
+    tag: CALL_NOTIFICATION_TAG,
+    renotify: true,
+    requireInteraction: true
+  });
+  notification.addEventListener('click', () => {
+    window.focus();
+    notification.close();
+    if (call.peer?.id) go('messages', { userId: call.peer.id }).catch(() => null);
+  });
+  callAlertState.activeNotification = notification;
+}
+
+function playIncomingCallRing() {
+  const context = ensureCallAudioContext();
+  if (!context) return;
+  const startTone = () => {
+    const startAt = context.currentTime + 0.02;
+    const stopAt = startAt + CALL_RING_BURST_SECONDS;
+    const gain = context.createGain();
+    const lowTone = context.createOscillator();
+    const highTone = context.createOscillator();
+    lowTone.type = 'sine';
+    highTone.type = 'sine';
+    lowTone.frequency.setValueAtTime(440, startAt);
+    highTone.frequency.setValueAtTime(480, startAt);
+    gain.gain.setValueAtTime(0.0001, startAt);
+    schedulePhonePulse(gain.gain, startAt, 0, 0.43);
+    schedulePhonePulse(gain.gain, startAt, 0.62, 0.43);
+    lowTone.connect(gain);
+    highTone.connect(gain);
+    gain.connect(context.destination);
+    lowTone.start(startAt);
+    highTone.start(startAt);
+    lowTone.stop(stopAt);
+    highTone.stop(stopAt);
+    highTone.addEventListener('ended', () => {
+      lowTone.disconnect();
+      highTone.disconnect();
+      gain.disconnect();
+    }, { once: true });
+  };
+  if (context.state === 'suspended') {
+    context.resume().then(startTone).catch(() => null);
+  } else {
+    startTone();
+  }
+}
+
+function schedulePhonePulse(param, baseTime, offset, duration) {
+  const startAt = baseTime + offset;
+  const endAt = startAt + duration;
+  param.setValueAtTime(0.0001, startAt);
+  param.exponentialRampToValueAtTime(0.18, startAt + 0.03);
+  param.setValueAtTime(0.18, endAt - 0.04);
+  param.exponentialRampToValueAtTime(0.0001, endAt);
+}
 
 async function pollIncomingVoiceCalls() {
   if (!state.me || voiceState.call) return;
@@ -827,6 +973,7 @@ async function pollIncomingVoiceCalls() {
   voiceState.peer = incoming.peer;
   voiceState.kind = incoming.kind || 'audio';
   voiceState.statusText = currentCallKind() === 'video' ? 'Chamada de video recebida' : 'Chamada recebida';
+  startIncomingCallAlert(incoming);
   renderVoiceCallPanel();
   startVoiceSignalPolling();
 }
@@ -871,6 +1018,7 @@ function renderVoiceCallPanel() {
         <button class="primary-btn" type="button" data-voice-action="answer"${disabled}>${voiceState.isBusy ? 'Atendendo...' : 'Atender'}</button>
         <button class="danger-btn" type="button" data-voice-action="decline"${disabled}>Recusar</button>
       ` : `
+        ${kind === 'video' ? `<button class="ghost-btn" type="button" data-voice-action="fullscreen"${disabled}>Tela cheia</button>` : ''}
         <button class="danger-btn" type="button" data-voice-action="end"${disabled}>Encerrar</button>
       `}
     </div>
@@ -879,6 +1027,7 @@ function renderVoiceCallPanel() {
   attachVideoStreams();
   panel.querySelector('[data-voice-action="answer"]')?.addEventListener('click', answerVoiceCall);
   panel.querySelector('[data-voice-action="decline"]')?.addEventListener('click', declineVoiceCall);
+  panel.querySelector('[data-voice-action="fullscreen"]')?.addEventListener('click', openVoiceVideoFullscreen);
   panel.querySelector('[data-voice-action="end"]')?.addEventListener('click', () => endVoiceCall(true));
 }
 
@@ -896,6 +1045,78 @@ function attachVideoStreams() {
   }
 }
 
+
+function createPortraitVideoStream(sourceStream) {
+  const videoTrack = sourceStream.getVideoTracks()[0];
+  if (!videoTrack || !HTMLCanvasElement.prototype.captureStream) return sourceStream;
+
+  const portraitVideo = document.createElement('video');
+  portraitVideo.muted = true;
+  portraitVideo.playsInline = true;
+  portraitVideo.autoplay = true;
+  portraitVideo.srcObject = new MediaStream([videoTrack]);
+
+  const portraitCanvas = document.createElement('canvas');
+  portraitCanvas.width = PORTRAIT_VIDEO_WIDTH;
+  portraitCanvas.height = PORTRAIT_VIDEO_HEIGHT;
+  const context = portraitCanvas.getContext('2d', { alpha: false });
+  if (!context) return sourceStream;
+
+  const drawFrame = () => {
+    drawPortraitFrame(context, portraitVideo, portraitCanvas);
+    voiceState.portraitFrame = requestAnimationFrame(drawFrame);
+  };
+  portraitVideo.addEventListener('loadedmetadata', () => {
+    portraitVideo.play().catch(() => null);
+    drawFrame();
+  }, { once: true });
+  portraitVideo.play().catch(() => null);
+
+  voiceState.portraitVideo = portraitVideo;
+  voiceState.portraitCanvas = portraitCanvas;
+
+  const portraitStream = portraitCanvas.captureStream(24);
+  sourceStream.getAudioTracks().forEach((track) => portraitStream.addTrack(track));
+  return portraitStream;
+}
+
+function drawPortraitFrame(context, video, canvas) {
+  const videoWidth = video.videoWidth || PORTRAIT_VIDEO_WIDTH;
+  const videoHeight = video.videoHeight || PORTRAIT_VIDEO_HEIGHT;
+  const targetRatio = canvas.width / canvas.height;
+  const sourceRatio = videoWidth / videoHeight;
+  let sx = 0;
+  let sy = 0;
+  let sw = videoWidth;
+  let sh = videoHeight;
+
+  if (sourceRatio > targetRatio) {
+    sw = videoHeight * targetRatio;
+    sx = (videoWidth - sw) / 2;
+  } else if (sourceRatio < targetRatio) {
+    sh = videoWidth / targetRatio;
+    sy = (videoHeight - sh) / 2;
+  }
+
+  context.fillStyle = '#050505';
+  context.fillRect(0, 0, canvas.width, canvas.height);
+  if (video.readyState >= 2) context.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
+}
+
+async function openVoiceVideoFullscreen() {
+  const target = document.querySelector('#voice-video-grid');
+  if (!target) return;
+  try {
+    if (document.fullscreenElement) {
+      await document.exitFullscreen();
+      return;
+    }
+    const request = target.requestFullscreen || target.webkitRequestFullscreen || target.msRequestFullscreen;
+    if (request) await request.call(target);
+  } catch (error) {
+    showToast('Nao foi possivel abrir em tela cheia.');
+  }
+}
 function ensureRemoteAudio() {
   if (!voiceState.remoteAudio) {
     const audio = document.createElement('audio');
@@ -910,15 +1131,27 @@ function ensureRemoteAudio() {
 
 function resetVoiceConnection() {
   voiceState.pc?.close();
-  voiceState.localStream?.getTracks().forEach((track) => track.stop());
+  if (voiceState.portraitFrame) cancelAnimationFrame(voiceState.portraitFrame);
+  voiceState.portraitVideo?.pause();
+  if (voiceState.portraitVideo) voiceState.portraitVideo.srcObject = null;
+  const tracks = new Set([
+    ...(voiceState.localStream?.getTracks() || []),
+    ...(voiceState.sourceStream?.getTracks() || [])
+  ]);
+  tracks.forEach((track) => track.stop());
   voiceState.remoteAudio?.remove();
   voiceState.pc = null;
   voiceState.localStream = null;
+  voiceState.sourceStream = null;
+  voiceState.portraitVideo = null;
+  voiceState.portraitCanvas = null;
+  voiceState.portraitFrame = null;
   voiceState.remoteStream = null;
   voiceState.remoteAudio = null;
   voiceState.pendingCandidates = [];
 }
 function cleanupVoiceCall() {
+  stopIncomingCallAlert();
   stopVoiceSignalPolling();
   resetVoiceConnection();
   voiceState.call = null;
@@ -1615,6 +1848,7 @@ async function reloadCurrent() {
 async function logout() {
   await endVoiceCall(true);
   stopVoicePolling();
+  stopIncomingCallAlert();
   stopUnreadPolling();
   await api('/api/auth/logout', { method: 'POST', body: {} });
   state.me = null;

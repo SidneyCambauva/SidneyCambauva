@@ -901,6 +901,50 @@ button:disabled {
   backdrop-filter: blur(16px);
 }
 
+.voice-call-content {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.voice-call-panel.video-active {
+  width: min(560px, calc(100vw - 32px));
+  align-items: stretch;
+  flex-direction: column;
+}
+
+.voice-video-grid {
+  position: relative;
+  overflow: hidden;
+  aspect-ratio: 16 / 9;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #050505;
+}
+
+.voice-remote-video,
+.voice-local-video {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  background: #050505;
+}
+
+.voice-local-video {
+  position: absolute;
+  right: 10px;
+  bottom: 10px;
+  width: 30%;
+  max-width: 150px;
+  min-width: 92px;
+  height: auto;
+  aspect-ratio: 16 / 9;
+  border: 2px solid var(--line);
+  border-radius: 8px;
+  box-shadow: 0 10px 28px var(--shadow);
+}
 .voice-call-main {
   display: flex;
   align-items: center;
@@ -1054,6 +1098,10 @@ button:disabled {
 
   .voice-call-actions button {
     flex: 1;
+  }
+  .voice-local-video {
+    width: 34%;
+    min-width: 84px;
   }
   .composer-actions {
     align-items: stretch;

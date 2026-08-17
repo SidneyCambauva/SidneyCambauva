@@ -276,6 +276,7 @@ test('SIX social workflow', async (t) => {
   });
   assert.equal(voiceCall.status, 201);
   assert.equal(voiceCall.data.call.status, 'ringing');
+  assert.equal(voiceCall.data.call.kind, 'audio');
   assert.equal(voiceCall.data.call.peer.username, 'admin');
 
   const offerSignal = await request(base, `/api/calls/${voiceCall.data.call.id}/signals`, {
@@ -324,6 +325,34 @@ test('SIX social workflow', async (t) => {
   const activeAfterEnd = await request(base, '/api/calls/active', { cookie: admin.cookie });
   assert.equal(activeAfterEnd.status, 200);
   assert.equal(activeAfterEnd.data.calls.some((call) => call.id === voiceCall.data.call.id), false);
+  const invalidCall = await request(base, '/api/calls', {
+    method: 'POST',
+    cookie: student.cookie,
+    body: { recipientId: admin.data.user.id, kind: 'screen' }
+  });
+  assert.equal(invalidCall.status, 400);
+
+  const videoCall = await request(base, '/api/calls', {
+    method: 'POST',
+    cookie: student.cookie,
+    body: { recipientId: admin.data.user.id, kind: 'video' }
+  });
+  assert.equal(videoCall.status, 201);
+  assert.equal(videoCall.data.call.status, 'ringing');
+  assert.equal(videoCall.data.call.kind, 'video');
+
+  const activeVideoForAdmin = await request(base, '/api/calls/active', { cookie: admin.cookie });
+  assert.equal(activeVideoForAdmin.status, 200);
+  assert.equal(activeVideoForAdmin.data.calls[0].incoming, true);
+  assert.equal(activeVideoForAdmin.data.calls[0].kind, 'video');
+
+  const endedVideoCall = await request(base, `/api/calls/${videoCall.data.call.id}/end`, {
+    method: 'POST',
+    cookie: student.cookie,
+    body: {}
+  });
+  assert.equal(endedVideoCall.status, 200);
+  assert.equal(endedVideoCall.data.call.status, 'ended');
   const deletion = await request(base, `/api/posts/${reply.data.post.id}/deletion-request`, {
     method: 'POST',
     cookie: student.cookie,

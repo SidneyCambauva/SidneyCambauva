@@ -614,13 +614,15 @@ function buildRoutes() {
     sendJson(ctx.res, 201, { message: messageShape(ctx.db.prepare('SELECT * FROM messages WHERE id = ?').get(Number(result.lastInsertRowid)), ctx.user.id) });
   });
 
-  // Cria uma chamada de voz 1 para 1 entre o usuario logado e outra pessoa.
+  // Cria uma chamada de audio ou video 1 para 1 entre o usuario logado e outra pessoa.
   add('POST', '/api/calls', async (ctx) => {
     requireAuth(ctx);
     expireOldVoiceCalls(ctx.db);
     const body = await readJson(ctx.req);
     const recipientId = Number(body.recipientId);
+    const kind = ['audio', 'video'].includes(String(body.kind || 'audio')) ? String(body.kind || 'audio') : '';
     if (!recipientId || recipientId === ctx.user.id) throw new HttpError(400, 'Escolha uma pessoa valida para chamar.');
+    if (!kind) throw new HttpError(400, 'Tipo de chamada invalido.');
 
     const recipient = ctx.db.prepare('SELECT * FROM users WHERE id = ? AND suspended_at IS NULL').get(recipientId);
     if (!recipient) throw new HttpError(404, 'Destinatario nao encontrado.');
@@ -629,11 +631,12 @@ function buildRoutes() {
     }
 
     const result = ctx.db.prepare(`
-      INSERT INTO voice_calls (caller_id, recipient_id)
-      VALUES (?, ?)
-    `).run(ctx.user.id, recipientId);
+      INSERT INTO voice_calls (caller_id, recipient_id, kind)
+      VALUES (?, ?, ?)
+    `).run(ctx.user.id, recipientId, kind);
     const callId = Number(result.lastInsertRowid);
-    notify(ctx.db, recipientId, ctx.user.id, 'voice_call', 'voice_call', callId, `${ctx.user.display_name} esta chamando voce por voz.`);
+    const mediaLabel = kind === 'video' ? 'video' : 'voz';
+    notify(ctx.db, recipientId, ctx.user.id, 'voice_call', 'voice_call', callId, `${ctx.user.display_name} esta chamando voce por ${mediaLabel}.`);
     sendJson(ctx.res, 201, { call: callShape(getCallForUser(ctx.db, callId, ctx.user.id), ctx.user.id) });
   });
 
@@ -1199,6 +1202,7 @@ function callSelectSql() {
     c.caller_id AS callerId,
     c.recipient_id AS recipientId,
     c.status AS status,
+    c.kind AS kind,
     c.created_at AS createdAt,
     c.answered_at AS answeredAt,
     c.ended_at AS endedAt,
@@ -1218,7 +1222,7 @@ function callSelectSql() {
   `;
 }
 
-// Formata chamada de voz para o navegador, mostrando sempre quem e a outra pessoa.
+// Formata chamada de audio/video para o navegador, mostrando sempre quem e a outra pessoa.
 function callShape(row, viewerId) {
   const peerPrefix = row.callerId === viewerId ? 'recipient' : 'caller';
   const peer = prefixedCallUser(row, peerPrefix);
@@ -1227,6 +1231,7 @@ function callShape(row, viewerId) {
     callerId: row.callerId,
     recipientId: row.recipientId,
     status: row.status,
+    kind: row.kind || 'audio',
     incoming: row.recipientId === viewerId && row.status === 'ringing',
     outgoing: row.callerId === viewerId && row.status === 'ringing',
     peer,

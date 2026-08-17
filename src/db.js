@@ -127,6 +127,7 @@ function initializeSchema(db) {
       caller_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       recipient_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE,
       status TEXT NOT NULL DEFAULT 'ringing' CHECK (status IN ('ringing', 'active', 'ended', 'declined', 'missed')),
+      kind TEXT NOT NULL DEFAULT 'audio' CHECK (kind IN ('audio', 'video')),
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
       answered_at TEXT,
       ended_at TEXT,
@@ -158,6 +159,7 @@ function initializeSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_deletion_requests_status ON deletion_requests(status, created_at DESC);
   `);
   migratePostsForMedia(db);
+  migrateVoiceCallsForVideo(db);
 }
 
 
@@ -193,4 +195,11 @@ function migratePostsForMedia(db) {
     CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_of_id);
     CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
   `);
+}
+// Migra bancos antigos para diferenciar chamada de voz e chamada de video.
+function migrateVoiceCallsForVideo(db) {
+  const columns = db.prepare("PRAGMA table_info(voice_calls)").all();
+  if (columns.some((column) => column.name === 'kind')) return;
+
+  db.exec("ALTER TABLE voice_calls ADD COLUMN kind TEXT NOT NULL DEFAULT 'audio' CHECK (kind IN ('audio', 'video'));");
 }

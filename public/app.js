@@ -47,13 +47,15 @@ const navItems = [
   ['messages', 'Mensagens'],
   ['profile', 'Perfil']
 ];
-// Estado da chamada de voz em andamento no navegador.
+// Estado da chamada de audio/video em andamento no navegador.
 const voiceState = {
   call: null,
   peer: null,
   pc: null,
   localStream: null,
+  remoteStream: null,
   remoteAudio: null,
+  kind: 'audio',
   signalCursor: 0,
   incomingPollTimer: null,
   signalPollTimer: null,
@@ -553,7 +555,8 @@ async function renderMessageThread(userId) {
       <h1>${escapeHtml(data.user.displayName)}</h1>
       <div class="message-head-actions">
         <button class="ghost-btn" data-profile="${escapeAttr(data.user.username)}">@${escapeHtml(data.user.username)}</button>
-        <button class="primary-btn" type="button" data-start-voice="${data.user.id}">Ligar</button>
+        <button class="ghost-btn" type="button" data-start-voice="${data.user.id}">Voz</button>
+        <button class="primary-btn" type="button" data-start-video="${data.user.id}">Video</button>
       </div>
     </div>
     <div class="message-thread" id="message-thread">
@@ -571,7 +574,8 @@ async function renderMessageThread(userId) {
   `;
   document.querySelector('#message-thread')?.scrollTo(0, 999999);
   document.querySelector('[data-profile]')?.addEventListener('click', (event) => go('profile', { username: event.currentTarget.dataset.profile }));
-  document.querySelector('[data-start-voice]')?.addEventListener('click', (event) => startVoiceCall(event.currentTarget.dataset.startVoice));
+  document.querySelector('[data-start-voice]')?.addEventListener('click', (event) => startVoiceCall(event.currentTarget.dataset.startVoice, 'audio'));
+  document.querySelector('[data-start-video]')?.addEventListener('click', (event) => startVoiceCall(event.currentTarget.dataset.startVideo, 'video'));
   document.querySelector('#message-form').addEventListener('submit', async (event) => {
     event.preventDefault();
     const body = new FormData(event.currentTarget).get('body');
@@ -580,9 +584,9 @@ async function renderMessageThread(userId) {
   });
 }
 
-// Inicia uma chamada de voz para a pessoa aberta na conversa.
-async function startVoiceCall(peerId) {
-  const problem = voiceSupportProblem();
+// Inicia uma chamada de audio ou video para a pessoa aberta na conversa.
+async function startVoiceCall(peerId, kind = 'audio') {
+  const problem = voiceSupportProblem(kind);
   if (problem) {
     showToast(problem);
     return;
@@ -593,13 +597,14 @@ async function startVoiceCall(peerId) {
   }
 
   let createdCall = null;
+  voiceState.kind = kind;
   voiceState.isBusy = true;
-  voiceState.statusText = 'Abrindo microfone...';
+  voiceState.statusText = openingMediaLabel(kind);
   try {
-    const data = await api('/api/calls', { method: 'POST', body: { recipientId: Number(peerId) } });
+    const data = await api('/api/calls', { method: 'POST', body: { recipientId: Number(peerId), kind } });
     createdCall = data.call;
-    await prepareVoiceConnection(createdCall, true);
-    const offer = await voiceState.pc.createOffer({ offerToReceiveAudio: true });
+    await prepareVoiceConnection(createdCall, true, kind);
+    const offer = await voiceState.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: kind === 'video' });
     await voiceState.pc.setLocalDescription(offer);
     await sendVoiceSignal('offer', voiceState.pc.localDescription);
     voiceState.isBusy = false;
@@ -609,14 +614,16 @@ async function startVoiceCall(peerId) {
   } catch (error) {
     if (createdCall?.id) await api(`/api/calls/${createdCall.id}/end`, { method: 'POST', body: {} }).catch(() => null);
     cleanupVoiceCall();
-    showToast(friendlyVoiceError(error));
+    showToast(friendlyVoiceError(error, kind));
   }
 }
 
-// Prepara microfone, conexao WebRTC e elemento de audio remoto.
-async function prepareVoiceConnection(call, isCaller) {
+// Prepara microfone/camera, conexao WebRTC e elementos de midia remota.
+async function prepareVoiceConnection(call, isCaller, requestedKind = 'audio') {
+  const kind = call.kind || requestedKind || 'audio';
   voiceState.call = call;
   voiceState.peer = call.peer;
+  voiceState.kind = kind;
   voiceState.isCaller = isCaller;
   voiceState.pendingCandidates = [];
   voiceState.signalCursor = 0;
@@ -624,7 +631,7 @@ async function prepareVoiceConnection(call, isCaller) {
 
   voiceState.localStream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    video: false
+    video: kind === 'video' ? { width: { ideal: 1280 }, height: { ideal: 720 }, facingMode: 'user' } : false
   });
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
@@ -635,14 +642,19 @@ async function prepareVoiceConnection(call, isCaller) {
     if (event.candidate) sendVoiceSignal('candidate', event.candidate).catch(() => null);
   });
   pc.addEventListener('track', (event) => {
-    const audio = ensureRemoteAudio();
-    audio.srcObject = event.streams[0];
-    audio.play().catch(() => null);
+    voiceState.remoteStream = event.streams[0] || voiceState.remoteStream;
+    if (currentCallKind() === 'video') {
+      attachVideoStreams();
+    } else {
+      const audio = ensureRemoteAudio();
+      audio.srcObject = voiceState.remoteStream;
+      audio.play().catch(() => null);
+    }
   });
   pc.addEventListener('connectionstatechange', () => {
     const label = {
       connecting: 'Conectando...',
-      connected: 'Chamada ativa',
+      connected: currentCallKind() === 'video' ? 'Chamada de video ativa' : 'Chamada ativa',
       disconnected: 'Reconectando...',
       failed: 'Falha na chamada',
       closed: 'Chamada encerrada'
@@ -656,11 +668,11 @@ async function prepareVoiceConnection(call, isCaller) {
 
   renderVoiceCallPanel();
 }
-
 // Atende uma chamada recebida e responde ao offer WebRTC do chamador.
 async function answerVoiceCall() {
-  const problem = voiceSupportProblem();
   const call = voiceState.call;
+  const kind = currentCallKind();
+  const problem = voiceSupportProblem(kind);
   if (!call || voiceState.isBusy) return;
   if (problem) {
     voiceState.statusText = problem;
@@ -670,12 +682,12 @@ async function answerVoiceCall() {
   }
 
   voiceState.isBusy = true;
-  voiceState.statusText = 'Abrindo microfone...';
+  voiceState.statusText = openingMediaLabel(kind);
   renderVoiceCallPanel();
   stopVoiceSignalPolling();
 
   try {
-    await prepareVoiceConnection(call, false);
+    await prepareVoiceConnection(call, false, kind);
     const answered = await api(`/api/calls/${call.id}/answer`, { method: 'POST', body: {} });
     voiceState.call = answered.call;
     voiceState.peer = answered.call.peer;
@@ -689,7 +701,7 @@ async function answerVoiceCall() {
   } catch (error) {
     resetVoiceConnection();
     voiceState.isBusy = false;
-    voiceState.statusText = friendlyVoiceError(error);
+    voiceState.statusText = friendlyVoiceError(error, kind);
     renderVoiceCallPanel();
     startVoiceSignalPolling();
     showToast(voiceState.statusText);
@@ -746,7 +758,7 @@ async function pollVoiceSignals() {
     voiceState.call = data.call;
     voiceState.peer = data.call.peer;
     if (!['ringing', 'active'].includes(data.call.status)) {
-      showToast(voiceCallStatusLabel(data.call.status));
+      showToast(voiceCallStatusLabel(data.call.status, data.call.kind || currentCallKind()));
       cleanupVoiceCall();
       return;
     }
@@ -813,7 +825,8 @@ async function pollIncomingVoiceCalls() {
   if (!incoming) return;
   voiceState.call = incoming;
   voiceState.peer = incoming.peer;
-  voiceState.statusText = 'Chamada recebida';
+  voiceState.kind = incoming.kind || 'audio';
+  voiceState.statusText = currentCallKind() === 'video' ? 'Chamada de video recebida' : 'Chamada recebida';
   renderVoiceCallPanel();
   startVoiceSignalPolling();
 }
@@ -831,16 +844,27 @@ function renderVoiceCallPanel() {
   }
 
   const call = voiceState.call;
+  const kind = currentCallKind();
   const incomingWaiting = call.incoming && !voiceState.pc;
-  const status = voiceState.statusText || voiceCallStatusLabel(call.status);
+  const status = voiceState.statusText || voiceCallStatusLabel(call.status, kind);
   const disabled = voiceState.isBusy ? ' disabled' : '';
+  const title = kind === 'video' ? 'Chamada de video' : 'Chamada de voz';
+  panel.classList.toggle('video-active', kind === 'video');
   panel.innerHTML = `
-    <div class="voice-call-main">
-      ${avatarHtml(voiceState.peer || call.peer)}
-      <div>
-        <strong>${escapeHtml((voiceState.peer || call.peer).displayName)}</strong>
-        <span>${escapeHtml(status)}</span>
+    <div class="voice-call-content">
+      <div class="voice-call-main">
+        ${avatarHtml(voiceState.peer || call.peer)}
+        <div>
+          <strong>${escapeHtml((voiceState.peer || call.peer).displayName)}</strong>
+          <span>${escapeHtml(title)} - ${escapeHtml(status)}</span>
+        </div>
       </div>
+      ${kind === 'video' && !incomingWaiting ? `
+        <div class="voice-video-grid">
+          <video id="voice-remote-video" class="voice-remote-video" autoplay playsinline></video>
+          <video id="voice-local-video" class="voice-local-video" autoplay playsinline muted></video>
+        </div>
+      ` : ''}
     </div>
     <div class="voice-call-actions">
       ${incomingWaiting ? `
@@ -852,9 +876,24 @@ function renderVoiceCallPanel() {
     </div>
   `;
 
+  attachVideoStreams();
   panel.querySelector('[data-voice-action="answer"]')?.addEventListener('click', answerVoiceCall);
   panel.querySelector('[data-voice-action="decline"]')?.addEventListener('click', declineVoiceCall);
   panel.querySelector('[data-voice-action="end"]')?.addEventListener('click', () => endVoiceCall(true));
+}
+
+function attachVideoStreams() {
+  const localVideo = document.querySelector('#voice-local-video');
+  if (localVideo && voiceState.localStream && localVideo.srcObject !== voiceState.localStream) {
+    localVideo.srcObject = voiceState.localStream;
+    localVideo.play().catch(() => null);
+  }
+
+  const remoteVideo = document.querySelector('#voice-remote-video');
+  if (remoteVideo && voiceState.remoteStream && remoteVideo.srcObject !== voiceState.remoteStream) {
+    remoteVideo.srcObject = voiceState.remoteStream;
+    remoteVideo.play().catch(() => null);
+  }
 }
 
 function ensureRemoteAudio() {
@@ -875,10 +914,10 @@ function resetVoiceConnection() {
   voiceState.remoteAudio?.remove();
   voiceState.pc = null;
   voiceState.localStream = null;
+  voiceState.remoteStream = null;
   voiceState.remoteAudio = null;
   voiceState.pendingCandidates = [];
 }
-
 function cleanupVoiceCall() {
   stopVoiceSignalPolling();
   resetVoiceConnection();
@@ -888,46 +927,58 @@ function cleanupVoiceCall() {
   voiceState.pendingCandidates = [];
   voiceState.pollingSignals = false;
   voiceState.isBusy = false;
+  voiceState.kind = 'audio';
   voiceState.statusText = '';
   renderVoiceCallPanel();
 }
 
-function voiceSupportProblem() {
+function currentCallKind() {
+  return voiceState.call?.kind || voiceState.kind || 'audio';
+}
+
+function openingMediaLabel(kind = currentCallKind()) {
+  return kind === 'video' ? 'Abrindo camera e microfone...' : 'Abrindo microfone...';
+}
+
+function voiceSupportProblem(kind = 'audio') {
   const host = window.location.hostname;
   const localHost = host === 'localhost' || host === '127.0.0.1' || host === '::1';
+  const mediaName = kind === 'video' ? 'camera e microfone' : 'microfone';
   if (!window.isSecureContext && !localHost) {
-    return 'O Edge suporta chamada de voz, mas bloqueia o microfone em HTTP pelo IP da rede. Use HTTPS ou teste em localhost.';
+    return `O navegador bloqueia ${mediaName} em HTTP pelo IP da rede. Use HTTPS ou teste em localhost.`;
   }
   if (!window.RTCPeerConnection) {
-    return 'Este navegador nao tem WebRTC habilitado para chamada de voz.';
+    return 'Este navegador nao tem WebRTC habilitado para chamadas.';
   }
   if (!navigator.mediaDevices?.getUserMedia) {
-    return 'O navegador nao liberou acesso ao microfone. Use HTTPS e confira a permissao do microfone.';
+    return `O navegador nao liberou acesso a ${mediaName}. Use HTTPS e confira as permissoes.`;
   }
   return '';
 }
 
-function friendlyVoiceError(error) {
+function friendlyVoiceError(error, kind = currentCallKind()) {
   const name = String(error?.name || '');
   const message = String(error?.message || '');
+  const mediaName = kind === 'video' ? 'camera e microfone' : 'microfone';
   if (name === 'NotAllowedError' || message.toLowerCase().includes('permission')) {
-    return 'Microfone bloqueado. Permita o microfone no navegador e tente atender novamente.';
+    return `${mediaName[0].toUpperCase()}${mediaName.slice(1)} bloqueado. Permita no navegador e tente novamente.`;
   }
   if (name === 'NotFoundError' || message.toLowerCase().includes('requested device not found')) {
-    return 'Nenhum microfone foi encontrado neste dispositivo.';
+    return kind === 'video' ? 'Nenhuma camera foi encontrada neste dispositivo.' : 'Nenhum microfone foi encontrado neste dispositivo.';
   }
   if (message) return message;
-  return 'Nao foi possivel iniciar a chamada de voz.';
+  return kind === 'video' ? 'Nao foi possivel iniciar a chamada de video.' : 'Nao foi possivel iniciar a chamada de voz.';
 }
 
-function voiceCallStatusLabel(status) {
+function voiceCallStatusLabel(status, kind = 'audio') {
+  const fallback = kind === 'video' ? 'Chamada de video' : 'Chamada de voz';
   return {
     ringing: 'Chamando...',
-    active: 'Chamada ativa',
+    active: kind === 'video' ? 'Chamada de video ativa' : 'Chamada ativa',
     ended: 'Chamada encerrada',
     declined: 'Chamada recusada',
     missed: 'Chamada perdida'
-  }[status] || 'Chamada de voz';
+  }[status] || fallback;
 }
 
 // Painel da equipe: metricas, pedidos de exclusao, denuncias e usuarios.

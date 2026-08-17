@@ -84,6 +84,12 @@ const callAlertState = {
   lastCallId: null,
   setup: false
 };
+// Estado do modal de imagem aberto a partir da timeline.
+const imageModalState = {
+  images: [],
+  index: 0,
+  keyHandler: null
+};
 
 init().catch((error) => {
   console.error(error);
@@ -1522,15 +1528,20 @@ function postMediaHtml(media = [], postId = '') {
   const images = media.slice(0, MAX_POST_IMAGES);
   return `
     <div class="post-media-grid count-${images.length}" data-open-post="${postId}">
-      ${images.map((item) => `
-        <div class="post-media-item">
-          <img src="${escapeAttr(mediaUrl(item.url))}" alt="${escapeAttr(item.altText || 'Imagem da publicacao')}" loading="lazy">
-        </div>
-      `).join('')}
+      ${images.map((item, index) => {
+        const src = mediaUrl(item.url);
+        const alt = item.altText || 'Imagem da publicacao';
+        return `
+          <div class="post-media-item">
+            <button class="post-media-button" type="button" data-open-image data-image-index="${index}" data-image-src="${escapeAttr(src)}" data-image-alt="${escapeAttr(alt)}" aria-label="Abrir imagem da publicacao">
+              <img src="${escapeAttr(src)}" alt="${escapeAttr(alt)}" loading="lazy">
+            </button>
+          </div>
+        `;
+      }).join('')}
     </div>
   `;
 }
-
 
 // Liga botoes de responder, curtir, repostar, pedir exclusao e denunciar.
 function attachPostActions(scope) {
@@ -1541,6 +1552,13 @@ function attachPostActions(scope) {
     });
   });
 
+  scope.querySelectorAll('[data-open-image]').forEach((button) => {
+    button.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openImageModal(button);
+    });
+  });
   scope.querySelectorAll('[data-open-post]').forEach((element) => {
     element.addEventListener('click', () => go('thread', { id: element.dataset.openPost }));
   });
@@ -1587,6 +1605,81 @@ function attachPostActions(scope) {
   });
 }
 
+
+
+// Abre imagens da timeline em um modal escuro, com navegacao parecida com redes sociais.
+function openImageModal(trigger) {
+  const buttons = Array.from(trigger.closest('.post-media-grid')?.querySelectorAll('[data-open-image]') || [trigger]);
+  const images = buttons
+    .map((button) => ({ src: button.dataset.imageSrc || '', alt: button.dataset.imageAlt || 'Imagem da publicacao' }))
+    .filter((image) => image.src);
+  if (!images.length) return;
+
+  imageModalState.images = images;
+  imageModalState.index = Math.max(0, buttons.indexOf(trigger));
+  document.body.classList.add('modal-open');
+  renderImageModal();
+}
+
+function renderImageModal() {
+  const images = imageModalState.images;
+  const total = images.length;
+  if (!total) return;
+
+  imageModalState.index = Math.max(0, Math.min(imageModalState.index, total - 1));
+  const image = images[imageModalState.index];
+  let modal = document.querySelector('#image-lightbox');
+  if (!modal) {
+    document.body.insertAdjacentHTML('beforeend', '<section class="image-lightbox" id="image-lightbox" role="dialog" aria-modal="true" aria-label="Imagem da publicacao"></section>');
+    modal = document.querySelector('#image-lightbox');
+  }
+
+  modal.innerHTML = `
+    <button class="image-lightbox-close" type="button" data-image-modal-close aria-label="Fechar imagem">x</button>
+    <div class="image-lightbox-stage" data-image-modal-stage>
+      ${total > 1 ? '<button class="image-lightbox-nav prev" type="button" data-image-modal-prev aria-label="Imagem anterior">&lt;</button>' : ''}
+      <img class="image-lightbox-image" src="${escapeAttr(image.src)}" alt="${escapeAttr(image.alt)}" draggable="false">
+      ${total > 1 ? '<button class="image-lightbox-nav next" type="button" data-image-modal-next aria-label="Proxima imagem">&gt;</button>' : ''}
+    </div>
+    ${total > 1 ? `<div class="image-lightbox-footer">${imageModalState.index + 1}/${total}</div>` : ''}
+  `;
+
+  modal.querySelector('[data-image-modal-close]')?.addEventListener('click', closeImageModal);
+  modal.querySelector('[data-image-modal-prev]')?.addEventListener('click', () => moveImageModal(-1));
+  modal.querySelector('[data-image-modal-next]')?.addEventListener('click', () => moveImageModal(1));
+  modal.querySelector('[data-image-modal-stage]')?.addEventListener('click', (event) => {
+    if (event.target === event.currentTarget) closeImageModal();
+  });
+  modal.onclick = (event) => {
+    if (event.target === modal) closeImageModal();
+  };
+
+  if (!imageModalState.keyHandler) {
+    imageModalState.keyHandler = (event) => {
+      if (event.key === 'Escape') closeImageModal();
+      if (event.key === 'ArrowLeft') moveImageModal(-1);
+      if (event.key === 'ArrowRight') moveImageModal(1);
+    };
+    document.addEventListener('keydown', imageModalState.keyHandler);
+  }
+  modal.querySelector('[data-image-modal-close]')?.focus();
+}
+
+function moveImageModal(direction) {
+  const total = imageModalState.images.length;
+  if (total < 2) return;
+  imageModalState.index = (imageModalState.index + direction + total) % total;
+  renderImageModal();
+}
+
+function closeImageModal() {
+  document.querySelector('#image-lightbox')?.remove();
+  document.body.classList.remove('modal-open');
+  if (imageModalState.keyHandler) document.removeEventListener('keydown', imageModalState.keyHandler);
+  imageModalState.images = [];
+  imageModalState.index = 0;
+  imageModalState.keyHandler = null;
+}
 
 // Card de usuario usado em busca e listas.
 function userCardHtml(user) {

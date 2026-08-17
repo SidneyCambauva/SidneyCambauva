@@ -38,6 +38,10 @@ body {
   color: var(--text);
 }
 
+body.modal-open {
+  overflow: hidden;
+}
+
 button,
 input,
 textarea,
@@ -648,6 +652,25 @@ button:disabled {
   background: #050505;
 }
 
+
+.post-media-button {
+  display: block;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  cursor: zoom-in;
+}
+
+.post-media-button img {
+  pointer-events: none;
+}
+
+.post-media-button:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: -2px;
+}
 .post-media-grid:not(.count-1) .post-media-item {
   aspect-ratio: 1;
 }
@@ -1155,6 +1178,7 @@ button:disabled {
     width: 34%;
     min-width: 84px;
   }
+
   .composer-actions {
     align-items: stretch;
   }
@@ -1164,74 +1188,37 @@ button:disabled {
     justify-content: space-between;
   }
 
-  
-/* Miniaturas locais das imagens antes de publicar. */
-.composer-media-preview {
+  .composer-media-preview {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
-  
-/* Tela de login/cadastro: divide marca e formulario. */
-.auth-wrap {
+
+  .auth-wrap {
     grid-template-columns: 1fr;
-    gap: 28px;
-    padding: 28px 18px;
+    padding: 18px;
   }
 
-  
-/* Layout principal em tres colunas: menu, feed e painel lateral. */
-.main-layout {
-    display: block;
-    padding-bottom: 72px;
+  .auth-brand {
+    text-align: center;
+    justify-items: center;
   }
 
-  
-/* Navegacao lateral fixa no desktop. */
-.left-nav {
-    position: fixed;
-    z-index: 20;
-    left: 0;
-    right: 0;
-    bottom: 0;
-    top: auto;
-    height: 64px;
-    border-right: 0;
-    border-top: 1px solid var(--line);
-    background: rgba(0, 0, 0, 0.94);
-    padding: 6px;
+  .auth-brand > div {
+    align-items: center;
   }
 
-  .brand-row,
-  .post-wide,
-  .account-mini {
-    display: none;
+  .profile-head {
+    grid-template-columns: 1fr;
   }
 
-  .nav-list {
-    display: grid;
-    grid-auto-flow: column;
-    grid-auto-columns: 1fr;
-    gap: 2px;
+  .profile-actions {
+    justify-content: flex-start;
   }
 
-  .nav-btn {
-    min-height: 52px;
-  }
-
-  
-/* Coluna central onde cada tela principal e renderizada. */
-.feed-main {
-    border-right: 0;
-  }
-
-  
-/* Barra de acoes sociais: responder, curtir, repostar, excluir, moderar e denunciar. */
-.post-actions {
+  .post-actions {
     grid-template-columns: repeat(3, minmax(0, 1fr));
   }
 
-  
-/* Layout de mensagens com lista de conversas e conteudo ao lado. */
-.two-pane {
+  .two-pane {
     grid-template-columns: 1fr;
   }
 
@@ -1244,6 +1231,85 @@ button:disabled {
   }
 }
 
+/* Modal de imagem da timeline, inspirado em visual de galeria social. */
+.image-lightbox {
+  position: fixed;
+  inset: 0;
+  z-index: 130;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+  color: white;
+  background: rgba(0, 0, 0, 0.94);
+}
+
+.image-lightbox-stage {
+  position: relative;
+  display: grid;
+  place-items: center;
+  min-width: 0;
+  min-height: 0;
+  padding: 54px 76px 18px;
+}
+
+.image-lightbox-image {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100vh - 118px);
+  object-fit: contain;
+  border-radius: 4px;
+  box-shadow: 0 24px 80px rgba(0, 0, 0, 0.48);
+}
+
+.image-lightbox-close,
+.image-lightbox-nav {
+  display: inline-grid;
+  place-items: center;
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: white;
+  background: rgba(15, 20, 25, 0.72);
+  backdrop-filter: blur(12px);
+}
+
+.image-lightbox-close {
+  position: fixed;
+  top: 18px;
+  right: 18px;
+  z-index: 2;
+  width: 42px;
+  height: 42px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 20px;
+}
+
+.image-lightbox-nav {
+  position: absolute;
+  top: 50%;
+  width: 48px;
+  height: 48px;
+  min-height: 0;
+  padding: 0;
+  border-radius: 50%;
+  font-size: 28px;
+  transform: translateY(-50%);
+}
+
+.image-lightbox-nav.prev {
+  left: 18px;
+}
+
+.image-lightbox-nav.next {
+  right: 18px;
+}
+
+.image-lightbox-footer {
+  min-height: 46px;
+  padding: 0 18px 18px;
+  color: rgba(255, 255, 255, 0.82);
+  text-align: center;
+  font-weight: 800;
+}
 
 /* Fundo do modal de edicao de perfil. */
 .modal-backdrop {
@@ -1255,7 +1321,6 @@ button:disabled {
   padding: 20px;
   background: rgba(0, 0, 0, 0.72);
 }
-
 
 /* Janela do editor de perfil. */
 .profile-editor {
@@ -1326,14 +1391,11 @@ button:disabled {
   height: 118px;
   border-radius: 50%;
   font-size: 32px;
-  font-weight: 900;
-  background: linear-gradient(135deg, #1d9bf0, #00ba7c);
-  color: white;
 }
 
 .banner-preview {
   width: 100%;
-  min-height: 132px;
+  aspect-ratio: 3 / 1;
   border-radius: 8px;
   background-size: cover;
   background-position: center;
@@ -1341,30 +1403,50 @@ button:disabled {
 
 .image-field input[type="file"] {
   width: 100%;
-  color: var(--muted);
 }
 
-.checkbox-row {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  color: var(--muted);
-  font-size: 14px;
-}
-
-
-/* Ajustes para celulares: menu inferior e composicao em uma coluna. */
 @media (max-width: 700px) {
-  
-/* Fundo do modal de edicao de perfil. */
-.modal-backdrop {
+  .image-lightbox-stage {
+    padding: 58px 12px 76px;
+  }
+
+  .image-lightbox-image {
+    max-height: calc(100vh - 150px);
+  }
+
+  .image-lightbox-nav {
+    top: auto;
+    bottom: 18px;
+    width: 42px;
+    height: 42px;
+    font-size: 24px;
+    transform: none;
+  }
+
+  .image-lightbox-nav.prev {
+    left: calc(50% - 54px);
+  }
+
+  .image-lightbox-nav.next {
+    right: calc(50% - 54px);
+  }
+
+  .image-lightbox-footer {
+    position: fixed;
+    left: 0;
+    right: 0;
+    bottom: 20px;
+    min-height: 42px;
+    padding: 0;
+    pointer-events: none;
+  }
+
+  .modal-backdrop {
     align-items: stretch;
     padding: 0;
   }
 
-  
-/* Janela do editor de perfil. */
-.profile-editor {
+  .profile-editor {
     width: 100%;
     max-height: 100vh;
     border-radius: 0;
@@ -1376,7 +1458,6 @@ button:disabled {
     grid-template-columns: 1fr;
   }
 }
-
 /* Aviso visual para posts aguardando decisao do administrador. */
 .moderation-line {
   display: inline-flex;

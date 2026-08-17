@@ -1007,7 +1007,7 @@ function renderVoiceCallPanel() {
         </div>
       </div>
       ${kind === 'video' && !incomingWaiting ? `
-        <div class="voice-video-grid">
+        <div class="voice-video-grid portrait-mode" id="voice-video-grid">
           <video id="voice-remote-video" class="voice-remote-video" autoplay playsinline></video>
           <video id="voice-local-video" class="voice-local-video" autoplay playsinline muted></video>
         </div>
@@ -1066,16 +1066,22 @@ function createPortraitVideoStream(sourceStream) {
     drawPortraitFrame(context, portraitVideo, portraitCanvas);
     voiceState.portraitFrame = requestAnimationFrame(drawFrame);
   };
-  portraitVideo.addEventListener('loadedmetadata', () => {
-    portraitVideo.play().catch(() => null);
+  const startPortraitRender = () => {
+    if (voiceState.portraitFrame) cancelAnimationFrame(voiceState.portraitFrame);
     drawFrame();
-  }, { once: true });
+  };
+
+  if (portraitVideo.readyState >= 1) {
+    startPortraitRender();
+  } else {
+    portraitVideo.addEventListener('loadedmetadata', startPortraitRender, { once: true });
+  }
   portraitVideo.play().catch(() => null);
 
   voiceState.portraitVideo = portraitVideo;
   voiceState.portraitCanvas = portraitCanvas;
 
-  const portraitStream = portraitCanvas.captureStream(24);
+  const portraitStream = portraitCanvas.captureStream(30);
   sourceStream.getAudioTracks().forEach((track) => portraitStream.addTrack(track));
   return portraitStream;
 }

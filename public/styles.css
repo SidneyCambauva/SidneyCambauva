@@ -920,11 +920,16 @@ button:disabled {
   position: relative;
   overflow: hidden;
   width: min(100%, 360px);
-  aspect-ratio: 9 / 16;
+  height: min(64vh, 640px);
+  max-height: calc(100vh - 180px);
   justify-self: center;
   border: 1px solid var(--line);
   border-radius: 8px;
   background: #050505;
+}
+
+.voice-video-grid.portrait-mode {
+  aspect-ratio: 9 / 16;
 }
 
 .voice-remote-video,
@@ -938,9 +943,12 @@ button:disabled {
 
 .voice-video-grid:fullscreen,
 .voice-video-grid:-webkit-full-screen {
+  display: grid;
+  place-items: center;
   width: 100vw;
   height: 100vh;
   max-width: none;
+  max-height: none;
   aspect-ratio: auto;
   border: 0;
   border-radius: 0;
@@ -949,7 +957,9 @@ button:disabled {
 
 .voice-video-grid:fullscreen .voice-remote-video,
 .voice-video-grid:-webkit-full-screen .voice-remote-video {
-  object-fit: contain;
+  width: min(100vw, 56.25vh);
+  height: 100vh;
+  object-fit: cover;
 }
 
 .voice-video-grid:fullscreen .voice-local-video,
@@ -974,7 +984,6 @@ button:disabled {
   border-radius: 8px;
   box-shadow: 0 10px 28px var(--shadow);
 }
-
 .voice-call-main {
   display: flex;
   align-items: center;
@@ -1128,6 +1137,8 @@ button:disabled {
 
   .voice-video-grid {
     width: min(100%, 300px);
+    height: min(56vh, 540px);
+    max-height: calc(100vh - 170px);
   }
 
   .voice-call-actions {

@@ -4,6 +4,8 @@ Slogan: **A Nossa Rede Social**
 
 SIX e uma rede social escolar para intranet, feita em Node.js, tema escuro e banco SQLite. Ela implementa cadastro por e-mail institucional, papeis de aluno/professor/admin, feed recomendado, posts, respostas, curtidas, reposts, busca, notificacoes, mensagens privadas, chamadas de voz 1 para 1 e painel de moderacao.
 
+# Primeiro Usuario https://www.linkedin.com/in/felipe-amorim-pontes-9115833aa/
+
 ## Codigo comentado para aula
 
 Os arquivos principais foram comentados com foco didatico, para ajudar em explicacoes com alunos:

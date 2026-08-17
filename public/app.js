@@ -62,6 +62,8 @@ const voiceState = {
   portraitVideo: null,
   portraitCanvas: null,
   portraitFrame: null,
+  cameraFacing: 'user',
+  switchingCamera: false,
   remoteStream: null,
   remoteAudio: null,
   kind: 'audio',
@@ -652,9 +654,10 @@ async function prepareVoiceConnection(call, isCaller, requestedKind = 'audio') {
 
   const sourceStream = await navigator.mediaDevices.getUserMedia({
     audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true },
-    video: kind === 'video' ? { width: { ideal: PORTRAIT_VIDEO_WIDTH }, height: { ideal: PORTRAIT_VIDEO_HEIGHT }, aspectRatio: { ideal: 9 / 16 }, facingMode: 'user' } : false
+    video: kind === 'video' ? videoCaptureConstraints('user') : false
   });
   voiceState.sourceStream = sourceStream;
+  voiceState.cameraFacing = 'user';
   voiceState.localStream = kind === 'video' ? createPortraitVideoStream(sourceStream) : sourceStream;
 
   const pc = new RTCPeerConnection(RTC_CONFIG);
@@ -994,7 +997,7 @@ function renderVoiceCallPanel() {
   const kind = currentCallKind();
   const incomingWaiting = call.incoming && !voiceState.pc;
   const status = voiceState.statusText || voiceCallStatusLabel(call.status, kind);
-  const disabled = voiceState.isBusy ? ' disabled' : '';
+  const disabled = voiceState.isBusy || voiceState.switchingCamera ? ' disabled' : '';
   const title = kind === 'video' ? 'Chamada de video' : 'Chamada de voz';
   panel.classList.toggle('video-active', kind === 'video');
   panel.innerHTML = `
@@ -1018,7 +1021,7 @@ function renderVoiceCallPanel() {
         <button class="primary-btn" type="button" data-voice-action="answer"${disabled}>${voiceState.isBusy ? 'Atendendo...' : 'Atender'}</button>
         <button class="danger-btn" type="button" data-voice-action="decline"${disabled}>Recusar</button>
       ` : `
-        ${kind === 'video' ? `<button class="ghost-btn" type="button" data-voice-action="fullscreen"${disabled}>Tela cheia</button>` : ''}
+        ${kind === 'video' ? `<button class="ghost-btn" type="button" data-voice-action="switch-camera"${disabled}>${voiceState.switchingCamera ? 'Trocando...' : 'Trocar camera'}</button><button class="ghost-btn" type="button" data-voice-action="fullscreen"${disabled}>Tela cheia</button>` : ''}
         <button class="danger-btn" type="button" data-voice-action="end"${disabled}>Encerrar</button>
       `}
     </div>
@@ -1027,6 +1030,7 @@ function renderVoiceCallPanel() {
   attachVideoStreams();
   panel.querySelector('[data-voice-action="answer"]')?.addEventListener('click', answerVoiceCall);
   panel.querySelector('[data-voice-action="decline"]')?.addEventListener('click', declineVoiceCall);
+  panel.querySelector('[data-voice-action="switch-camera"]')?.addEventListener('click', switchVoiceCamera);
   panel.querySelector('[data-voice-action="fullscreen"]')?.addEventListener('click', openVoiceVideoFullscreen);
   panel.querySelector('[data-voice-action="end"]')?.addEventListener('click', () => endVoiceCall(true));
 }
@@ -1046,6 +1050,23 @@ function attachVideoStreams() {
 }
 
 
+
+function videoCaptureConstraints(facingMode = 'user', strict = false) {
+  return {
+    width: { ideal: PORTRAIT_VIDEO_WIDTH },
+    height: { ideal: PORTRAIT_VIDEO_HEIGHT },
+    aspectRatio: { ideal: 9 / 16 },
+    facingMode: strict ? { exact: facingMode } : { ideal: facingMode }
+  };
+}
+
+async function openCameraOnlyStream(facingMode) {
+  try {
+    return await navigator.mediaDevices.getUserMedia({ audio: false, video: videoCaptureConstraints(facingMode, true) });
+  } catch {
+    return navigator.mediaDevices.getUserMedia({ audio: false, video: videoCaptureConstraints(facingMode, false) });
+  }
+}
 function createPortraitVideoStream(sourceStream) {
   const videoTrack = sourceStream.getVideoTracks()[0];
   if (!videoTrack || !HTMLCanvasElement.prototype.captureStream) return sourceStream;
@@ -1109,6 +1130,57 @@ function drawPortraitFrame(context, video, canvas) {
   if (video.readyState >= 2) context.drawImage(video, sx, sy, sw, sh, 0, 0, canvas.width, canvas.height);
 }
 
+
+async function switchVoiceCamera() {
+  if (currentCallKind() !== 'video' || !voiceState.pc || !voiceState.sourceStream || voiceState.switchingCamera) return;
+
+  const nextFacing = voiceState.cameraFacing === 'user' ? 'environment' : 'user';
+  const previousFacing = voiceState.cameraFacing || 'user';
+  const previousLocalStream = voiceState.localStream;
+  const previousLocalVideoTracks = previousLocalStream?.getVideoTracks() || [];
+  const previousSourceVideoTracks = voiceState.sourceStream.getVideoTracks();
+  const previousPortraitVideo = voiceState.portraitVideo;
+  voiceState.switchingCamera = true;
+  voiceState.statusText = 'Trocando camera...';
+  renderVoiceCallPanel();
+
+  let cameraStream = null;
+  try {
+    cameraStream = await openCameraOnlyStream(nextFacing);
+    const newSourceTrack = cameraStream.getVideoTracks()[0];
+    if (!newSourceTrack) throw new Error('Camera nao encontrada.');
+
+    const nextSourceStream = new MediaStream([...voiceState.sourceStream.getAudioTracks(), newSourceTrack]);
+    const newLocalStream = createPortraitVideoStream(nextSourceStream);
+    const newVideoTrack = newLocalStream.getVideoTracks()[0];
+    const sender = voiceState.pc.getSenders().find((item) => item.track?.kind === 'video');
+    if (!sender || !newVideoTrack) throw new Error('Nao foi possivel substituir a camera.');
+
+    await sender.replaceTrack(newVideoTrack);
+    newSourceTrack.enabled = true;
+    [...previousSourceVideoTracks, ...previousLocalVideoTracks].forEach((track) => {
+      if (track !== newSourceTrack && track !== newVideoTrack) track.stop();
+    });
+    if (previousPortraitVideo && previousPortraitVideo !== voiceState.portraitVideo) {
+      previousPortraitVideo.pause();
+      previousPortraitVideo.srcObject = null;
+    }
+
+    voiceState.sourceStream = nextSourceStream;
+    voiceState.localStream = newLocalStream;
+    voiceState.cameraFacing = nextFacing;
+    voiceState.statusText = nextFacing === 'environment' ? 'Camera traseira ativa' : 'Camera dianteira ativa';
+    attachVideoStreams();
+  } catch (error) {
+    cameraStream?.getTracks().forEach((track) => track.stop());
+    voiceState.cameraFacing = previousFacing;
+    voiceState.statusText = 'Chamada de video ativa';
+    showToast(nextFacing === 'environment' ? 'Nao foi possivel abrir a camera traseira.' : 'Nao foi possivel abrir a camera dianteira.');
+  } finally {
+    voiceState.switchingCamera = false;
+    renderVoiceCallPanel();
+  }
+}
 async function openVoiceVideoFullscreen() {
   const target = document.querySelector('#voice-video-grid');
   if (!target) return;
@@ -1152,6 +1224,8 @@ function resetVoiceConnection() {
   voiceState.portraitVideo = null;
   voiceState.portraitCanvas = null;
   voiceState.portraitFrame = null;
+  voiceState.cameraFacing = 'user';
+  voiceState.switchingCamera = false;
   voiceState.remoteStream = null;
   voiceState.remoteAudio = null;
   voiceState.pendingCandidates = [];

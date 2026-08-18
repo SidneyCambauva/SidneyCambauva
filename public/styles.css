@@ -786,6 +786,49 @@ button:disabled {
 }
 
 
+/* Notificacoes com avatar, texto e acao de destino. */
+.notice-card {
+  display: grid;
+  grid-template-columns: 48px minmax(0, 1fr) auto;
+  gap: 12px;
+  align-items: start;
+}
+
+.notice-card-action:hover {
+  background: var(--panel);
+}
+
+.notice-card.unread {
+  background: rgba(29, 155, 240, 0.08);
+}
+
+.notice-avatar-link {
+  border: 0;
+  padding: 0;
+  background: transparent;
+  border-radius: 999px;
+}
+
+.notice-avatar-link:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+}
+
+.notice-body {
+  min-width: 0;
+}
+
+.notice-body p {
+  margin: 4px 0;
+  line-height: 1.38;
+}
+
+.notice-target-btn {
+  align-self: center;
+  white-space: nowrap;
+}
+
+
 /* Resultado de usuario em busca e listagens. */
 .user-card {
   display: grid;
@@ -1227,6 +1270,23 @@ button:disabled {
   .user-row,
   .message-top {
     flex-wrap: wrap;
+  }
+
+  .notice-card {
+    grid-template-columns: 42px minmax(0, 1fr);
+    gap: 10px;
+    padding: 12px;
+  }
+
+  .notice-card .avatar {
+    width: 40px;
+    height: 40px;
+  }
+
+  .notice-target-btn {
+    grid-column: 2;
+    justify-self: start;
+    white-space: normal;
   }
 
   .post-media-grid,

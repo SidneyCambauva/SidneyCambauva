@@ -190,7 +190,10 @@ test('SIX social workflow', async (t) => {
 
   const adminNotifications = await request(base, '/api/notifications', { cookie: admin.cookie });
   assert.equal(adminNotifications.status, 200);
-  assert.ok(adminNotifications.data.notifications.some((item) => item.type === 'delete_request' && item.entityId === studentPost.data.post.id));
+  const deleteRequestNotice = adminNotifications.data.notifications.find((item) => item.type === 'delete_request' && item.entityId === studentPost.data.post.id);
+  assert.ok(deleteRequestNotice);
+  assert.equal(deleteRequestNotice.actor.username, student.data.user.username);
+  assert.equal(deleteRequestNotice.actor.avatarUrl, profileUpdate.data.user.avatarUrl);
 
   const unreadAfterDeleteRequest = await request(base, '/api/unread-counts', { cookie: admin.cookie });
   assert.equal(unreadAfterDeleteRequest.status, 200);

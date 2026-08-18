@@ -478,15 +478,104 @@ async function loadNotifications() {
 
   const data = await api('/api/notifications');
   const list = document.querySelector('#notifications-list');
-  list.innerHTML = data.notifications.length ? data.notifications.map((notification) => `
-    <article class="notice-card">
-      <div class="message-top">
-        <strong>${escapeHtml(notification.body)}</strong>
-        ${notification.readAt ? '' : '<span class="role teacher">novo</span>'}
+  list.innerHTML = data.notifications.length
+    ? data.notifications.map(notificationCardHtml).join('')
+    : '<div class="empty">Sem notificacoes.</div>';
+  attachNotificationActions(list);
+
+  if (data.notifications.some((notification) => !notification.readAt)) {
+    await api('/api/notifications/read', { method: 'POST', body: {} });
+    list.querySelectorAll('.notice-card.unread').forEach((card) => {
+      card.classList.remove('unread');
+      card.classList.add('read');
+    });
+    list.querySelectorAll('[data-notice-new]').forEach((badge) => badge.remove());
+    await refreshUnreadCounts();
+  }
+}
+
+
+// Monta cada aviso com link para o usuario e para o destino da acao.
+function notificationCardHtml(notification) {
+  const actor = notification.actor;
+  const target = notificationTarget(notification);
+  const actionAttrs = target
+    ? ` data-notification-action="${escapeAttr(target.action)}" data-notification-value="${escapeAttr(target.value)}"`
+    : '';
+  const actorProfile = actor?.username
+    ? ` data-notification-profile="${escapeAttr(actor.username)}"`
+    : '';
+  const actorName = actor?.displayName || 'SIX';
+  const actorUsername = actor?.username ? `@${actor.username}` : 'Sistema';
+
+  return `
+    <article class="notice-card ${notification.readAt ? 'read' : 'unread'}${target ? ' notice-card-action' : ''}"${actionAttrs}>
+      ${actor ? `
+        <button class="notice-avatar-link" type="button"${actorProfile} title="Abrir perfil de ${escapeAttr(actorName)}" aria-label="Abrir perfil de ${escapeAttr(actorName)}">
+          ${avatarHtml(actor)}
+        </button>
+      ` : avatarHtml({ displayName: 'SIX', username: 'six' })}
+      <div class="notice-body">
+        <div class="message-top">
+          ${actor ? `
+            <button class="name ghost-link" type="button"${actorProfile}>${escapeHtml(actorName)}</button>
+          ` : `<strong>${escapeHtml(actorName)}</strong>`}
+          ${notification.readAt ? '' : '<span class="role teacher" data-notice-new>novo</span>'}
+        </div>
+        <p>${escapeHtml(notification.body)}</p>
+        <div class="username">${escapeHtml(actorUsername)}</div>
+        <div class="muted">${formatTime(notification.createdAt)}</div>
       </div>
-      <div class="muted">${formatTime(notification.createdAt)}</div>
+      ${target ? `<button class="ghost-btn notice-target-btn" type="button" data-notification-action="${escapeAttr(target.action)}" data-notification-value="${escapeAttr(target.value)}">${escapeHtml(target.label)}</button>` : ''}
     </article>
-  `).join('') : '<div class="empty">Sem notificacoes.</div>';
+  `;
+}
+
+
+// Decide para onde cada notificacao deve levar quando o usuario clica nela.
+function notificationTarget(notification) {
+  if (notification.entityType === 'message' && notification.actor?.id) {
+    return { action: 'messages', value: notification.actor.id, label: 'Abrir conversa' };
+  }
+  if (notification.entityType === 'voice_call' && notification.actor?.id) {
+    return { action: 'messages', value: notification.actor.id, label: 'Abrir mensagens' };
+  }
+  if (notification.entityType === 'post' && notification.entityId) {
+    return { action: 'thread', value: notification.entityId, label: 'Abrir publicacao' };
+  }
+  if (notification.actor?.username) {
+    return { action: 'profile', value: notification.actor.username, label: 'Abrir perfil' };
+  }
+  return null;
+}
+
+
+// Liga os cliques dos avisos ao perfil, publicacao ou conversa correspondente.
+function attachNotificationActions(scope) {
+  scope.querySelectorAll('[data-notification-profile]').forEach((element) => {
+    element.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      go('profile', { username: element.dataset.notificationProfile });
+    });
+  });
+
+  scope.querySelectorAll('[data-notification-action]').forEach((element) => {
+    element.addEventListener('click', (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      openNotificationTarget(element.dataset.notificationAction, element.dataset.notificationValue);
+    });
+  });
+}
+
+
+// Abre o destino escolhido para a notificacao.
+function openNotificationTarget(action, value) {
+  if (action === 'thread') return go('thread', { id: value });
+  if (action === 'messages') return go('messages', { userId: value });
+  if (action === 'profile') return go('profile', { username: value });
+  return null;
 }
 
 

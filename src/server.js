@@ -907,6 +907,31 @@ function buildRoutes() {
     sendJson(ctx.res, 200, { ok: true });
   });
 
+  // Admin fixa uma publicacao no topo do feed recomendado.
+  add('POST', '/api/admin/posts/:id/pin', (ctx) => {
+    requireAdmin(ctx);
+    const target = getActionTarget(ctx.db, intParam(ctx, 'id'), ctx.user);
+    ctx.db.prepare(`
+      UPDATE posts
+      SET pinned_at = COALESCE(pinned_at, CURRENT_TIMESTAMP), pinned_by = ?
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(ctx.user.id, target.id);
+    sendJson(ctx.res, 200, { post: fetchPosts(ctx.db, 'WHERE p.id = ?', [target.id], ctx.user.id)[0] });
+  });
+
+
+  // Admin remove a fixagem manual de uma publicacao.
+  add('DELETE', '/api/admin/posts/:id/pin', (ctx) => {
+    requireAdmin(ctx);
+    const target = getActionTarget(ctx.db, intParam(ctx, 'id'), ctx.user);
+    ctx.db.prepare(`
+      UPDATE posts
+      SET pinned_at = NULL, pinned_by = NULL
+      WHERE id = ? AND deleted_at IS NULL
+    `).run(target.id);
+    sendJson(ctx.res, 200, { post: fetchPosts(ctx.db, 'WHERE p.id = ?', [target.id], ctx.user.id)[0] });
+  });
+
   // Painel de usuarios: mostra papeis, contagens e situacao da conta.
   add('GET', '/api/admin/users', (ctx) => {
     requireStaff(ctx);
@@ -984,6 +1009,8 @@ function fetchPosts(db, whereAndOrderSql, params, viewerId) {
       p.parent_id AS parentId,
       p.repost_of_id AS repostOfId,
       p.created_at AS createdAt,
+      p.pinned_at AS pinnedAt,
+      p.pinned_by AS pinnedBy,
       u.id AS authorId,
       u.display_name AS authorName,
       u.username AS authorUsername,
@@ -994,6 +1021,8 @@ function fetchPosts(db, whereAndOrderSql, params, viewerId) {
       op.id AS originalId,
       op.body AS originalBody,
       op.created_at AS originalCreatedAt,
+      op.pinned_at AS originalPinnedAt,
+      op.pinned_by AS originalPinnedBy,
       ou.id AS originalAuthorId,
       ou.display_name AS originalAuthorName,
       ou.username AS originalAuthorUsername,
@@ -1063,6 +1092,9 @@ function postShape(row) {
     id: row.originalId,
     body: row.originalBody,
     createdAt: toIso(row.originalCreatedAt),
+    pinnedAt: toIso(row.originalPinnedAt),
+    pinnedBy: row.originalPinnedBy || null,
+    pinned: Boolean(row.originalPinnedAt),
     author: {
       id: row.originalAuthorId,
       displayName: row.originalAuthorName,
@@ -1080,6 +1112,9 @@ function postShape(row) {
     parentId: row.parentId,
     repostOfId: row.repostOfId,
     createdAt: toIso(row.createdAt),
+    pinnedAt: toIso(row.pinnedAt),
+    pinnedBy: row.pinnedBy || null,
+    pinned: Boolean(row.pinnedAt),
     score: row.score || null,
     viewerId: row.viewerId,
     authorId: row.authorId,

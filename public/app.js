@@ -1606,8 +1606,11 @@ function attachComposer(parentId, afterSubmit) {
 // Card principal da timeline, incluindo repost, texto, imagens, moderacao e acoes.
 function postHtml(post) {
   const targetId = post.repostOfId || post.id;
+  const targetPinned = post.original ? post.original.pinned : post.pinned;
   const canDeleteRequest = (post.author.id === state.me.id || isStaff()) && !post.moderation?.pendingDeletion;
   const canAdminDeletePending = state.me.role === 'admin' && post.moderation?.pendingDeletion;
+  const canAdminPin = state.me.role === 'admin' && !post.moderation?.pendingDeletion;
+  const pinnedNotice = targetPinned ? '<div class="pinned-line">Publicacao fixada</div>' : '';
   const moderationNotice = post.moderation?.pendingDeletion ? '<div class="moderation-line">Exclusao pendente: visivel somente para admin.</div>' : '';
   const body = post.original
     ? quoteHtml(post.original)
@@ -1617,6 +1620,7 @@ function postHtml(post) {
     <article class="post-card" data-post-card="${post.id}">
       ${avatarHtml(post.author)}
       <div>
+        ${pinnedNotice}
         ${post.original ? `<div class="repost-line">${escapeHtml(post.author.displayName)} repostou</div>` : ''}
         <div class="post-top">
           <button class="name ghost-link${onlineClass(post.author)}" data-profile="${escapeAttr(post.author.username)}"${onlineUserAttr(post.author)}>${escapeHtml(post.author.displayName)}</button>
@@ -1632,6 +1636,7 @@ function postHtml(post) {
           <button class="icon-btn ${post.viewer.reposted ? 'active-repost' : ''}" data-action="repost" data-id="${targetId}" data-active="${post.viewer.reposted ? '1' : '0'}">Repost ${post.metrics.reposts}</button>
           ${canDeleteRequest ? `<button class="icon-btn" data-action="delete-request" data-id="${post.id}">Excluir</button>` : '<span></span>'}
           <button class="icon-btn" data-action="report" data-id="${post.id}">Denunciar</button>
+          ${canAdminPin ? `<button class="icon-btn ${targetPinned ? 'active-pin' : ''}" data-action="${targetPinned ? 'unpin-post' : 'pin-post'}" data-id="${targetId}">${targetPinned ? 'Desafixar' : 'Fixar'}</button>` : ''}
           ${canAdminDeletePending ? `<button class="icon-btn admin-delete-post" data-action="admin-delete-pending" data-id="${targetId}" title="Excluir publicacao solicitada" aria-label="Excluir publicacao solicitada">${trashIconHtml()}</button>` : ''}
         </div>
       </div>
@@ -1724,6 +1729,11 @@ function attachPostActions(scope) {
             showToast('Publicacao excluida.');
             await reloadCurrent();
           }
+        }
+        if (action === 'pin-post' || action === 'unpin-post') {
+          await api(`/api/admin/posts/${id}/pin`, { method: action === 'pin-post' ? 'POST' : 'DELETE', body: {} });
+          showToast(action === 'pin-post' ? 'Publicacao fixada.' : 'Fixagem removida.');
+          await reloadCurrent();
         }
         if (action === 'report') {
           const details = prompt('Descreva o problema');

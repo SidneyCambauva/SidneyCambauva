@@ -772,6 +772,28 @@ button:disabled {
   color: var(--green);
 }
 
+.icon-btn.active-pin {
+  color: var(--amber);
+}
+
+.pinned-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  color: var(--amber);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+.pinned-line::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--amber);
+}
+
 .repost-line {
   color: var(--muted);
   font-size: 13px;

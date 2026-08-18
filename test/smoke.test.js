@@ -165,9 +165,26 @@ test('SIX social workflow', async (t) => {
   });
   assert.equal(tooManyImages.status, 400);
 
+  const deniedPin = await request(base, `/api/admin/posts/${studentPost.data.post.id}/pin`, {
+    method: 'POST',
+    cookie: student.cookie,
+    body: {}
+  });
+  assert.equal(deniedPin.status, 403);
+
+  const pinnedPost = await request(base, `/api/admin/posts/${studentPost.data.post.id}/pin`, {
+    method: 'POST',
+    cookie: admin.cookie,
+    body: {}
+  });
+  assert.equal(pinnedPost.status, 200);
+  assert.equal(pinnedPost.data.post.pinned, true);
+  assert.ok(pinnedPost.data.post.pinnedAt);
+
   const feed = await request(base, '/api/feed', { cookie: student.cookie });
   assert.equal(feed.status, 200);
   assert.ok(feed.data.posts.length >= 2);
+  assert.equal(feed.data.posts[0].id, studentPost.data.post.id);
   const feedAuthors = new Set(feed.data.posts.map((item) => item.author.username));
   assert.ok(feedAuthors.has('admin'));
   assert.ok(feedAuthors.has('aluno1'));
@@ -175,6 +192,13 @@ test('SIX social workflow', async (t) => {
   assert.ok(feedImagePost);
   assert.equal(feedImagePost.media.length, 1);
 
+  const unpinnedPost = await request(base, `/api/admin/posts/${studentPost.data.post.id}/pin`, {
+    method: 'DELETE',
+    cookie: admin.cookie,
+    body: {}
+  });
+  assert.equal(unpinnedPost.status, 200);
+  assert.equal(unpinnedPost.data.post.pinned, false);
 
   const hideRequest = await request(base, `/api/posts/${studentPost.data.post.id}/deletion-request`, {
     method: 'POST',

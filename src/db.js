@@ -56,6 +56,8 @@ function initializeSchema(db) {
       parent_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
       repost_of_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      pinned_at TEXT,
+      pinned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       deleted_at TEXT,
       deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       delete_reason TEXT,
@@ -150,6 +152,7 @@ function initializeSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_posts_parent ON posts(parent_id);
     CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_of_id);
     CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_posts_pinned ON posts(pinned_at DESC);
     CREATE INDEX IF NOT EXISTS idx_post_media_post_position ON post_media(post_id, position);
     CREATE INDEX IF NOT EXISTS idx_notifications_user_created ON notifications(user_id, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_messages_pair ON messages(sender_id, recipient_id, created_at DESC);
@@ -161,6 +164,7 @@ function initializeSchema(db) {
   `);
   migrateUsersForPresence(db);
   migratePostsForMedia(db);
+  migratePostsForPinning(db);
   migrateVoiceCallsForVideo(db);
 }
 
@@ -190,6 +194,8 @@ function migratePostsForMedia(db) {
       parent_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
       repost_of_id INTEGER REFERENCES posts(id) ON DELETE SET NULL,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      pinned_at TEXT,
+      pinned_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       deleted_at TEXT,
       deleted_by INTEGER REFERENCES users(id) ON DELETE SET NULL,
       delete_reason TEXT,
@@ -206,8 +212,24 @@ function migratePostsForMedia(db) {
     CREATE INDEX IF NOT EXISTS idx_posts_parent ON posts(parent_id);
     CREATE INDEX IF NOT EXISTS idx_posts_repost ON posts(repost_of_id);
     CREATE INDEX IF NOT EXISTS idx_posts_created ON posts(created_at DESC);
+    CREATE INDEX IF NOT EXISTS idx_posts_pinned ON posts(pinned_at DESC);
   `);
 }
+
+
+// Migra bancos antigos para permitir fixar publicacoes manualmente no feed.
+function migratePostsForPinning(db) {
+  const columns = db.prepare("PRAGMA table_info(posts)").all();
+  if (!columns.some((column) => column.name === 'pinned_at')) {
+    db.exec("ALTER TABLE posts ADD COLUMN pinned_at TEXT;");
+  }
+  if (!columns.some((column) => column.name === 'pinned_by')) {
+    db.exec("ALTER TABLE posts ADD COLUMN pinned_by INTEGER REFERENCES users(id) ON DELETE SET NULL;");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_posts_pinned ON posts(pinned_at DESC);");
+}
+
+
 // Migra bancos antigos para diferenciar chamada de voz e chamada de video.
 function migrateVoiceCallsForVideo(db) {
   const columns = db.prepare("PRAGMA table_info(voice_calls)").all();

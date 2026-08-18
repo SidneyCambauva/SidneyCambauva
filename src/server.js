@@ -16,6 +16,8 @@ const USERNAME_PATTERN = /^[a-z0-9_]{3,24}$/;
 const ROLES = new Set(['student', 'teacher', 'admin']);
 const MAX_PROFILE_IMAGE_BYTES = 4 * 1024 * 1024;
 const MAX_POST_IMAGES = 4;
+const ONLINE_WINDOW_SECONDS = 120;
+const PRESENCE_TOUCH_SECONDS = 30;
 const IMAGE_EXTENSIONS = new Map([
   ['image/png', 'png'],
   ['image/jpeg', 'jpg'],
@@ -83,6 +85,7 @@ async function handleRequest(req, res, state) {
   if (!match) throw new HttpError(404, 'Rota nao encontrada.');
 
   const user = getSessionUser(req, state.db);
+  touchUserPresence(state.db, user);
   const ctx = { ...state, req, res, url, user, params: match.params };
   await match.handler(ctx);
 }
@@ -125,8 +128,8 @@ function buildRoutes() {
 
     try {
       const result = ctx.db.prepare(`
-        INSERT INTO users (display_name, username, email, role, password_hash)
-        VALUES (?, ?, ?, ?, ?)
+        INSERT INTO users (display_name, username, email, role, password_hash, last_seen_at)
+        VALUES (?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
       `).run(displayName, username, email, role, hashPassword(password));
 
       const user = ctx.db.prepare('SELECT * FROM users WHERE id = ?').get(Number(result.lastInsertRowid));
@@ -158,6 +161,7 @@ function buildRoutes() {
     if (user.suspended_at) throw new HttpError(403, 'Esta conta esta suspensa.');
 
     createSession(ctx, user.id);
+    touchUserPresence(ctx.db, user, true);
     sendJson(ctx.res, 200, { user: selfUserShape(user) });
   });
 
@@ -165,7 +169,11 @@ function buildRoutes() {
   // Logout: apaga a sessao do banco e expira o cookie no navegador.
   add('POST', '/api/auth/logout', (ctx) => {
     const token = parseCookies(ctx.req.headers.cookie || '')[SESSION_COOKIE];
+    const session = token ? ctx.db.prepare('SELECT user_id FROM sessions WHERE id = ?').get(token) : null;
     if (token) ctx.db.prepare('DELETE FROM sessions WHERE id = ?').run(token);
+    if (session?.user_id && !ctx.db.prepare('SELECT 1 FROM sessions WHERE user_id = ? LIMIT 1').get(session.user_id)) {
+      ctx.db.prepare("UPDATE users SET last_seen_at = datetime('now', ?) WHERE id = ?").run(`-${ONLINE_WINDOW_SECONDS + 1} seconds`, session.user_id);
+    }
     ctx.res.setHeader('Set-Cookie', serializeCookie(SESSION_COOKIE, '', { maxAge: 0, expires: new Date(0), secure: ctx.config.secureCookie }));
     sendJson(ctx.res, 200, { ok: true });
   });
@@ -499,12 +507,24 @@ function buildRoutes() {
     sendJson(ctx.res, 200, { notifications, messages });
   });
 
+  // Presenca online: usuarios ativos recentemente, usada para destacar avatares e nomes.
+  add('GET', '/api/presence', (ctx) => {
+    requireAuth(ctx);
+    const rows = ctx.db.prepare(`
+      SELECT id
+      FROM users
+      WHERE suspended_at IS NULL
+        AND last_seen_at >= datetime('now', ?)
+    `).all(`-${ONLINE_WINDOW_SECONDS} seconds`);
+    sendJson(ctx.res, 200, { onlineUserIds: rows.map((row) => row.id) });
+  });
+
   // Central de notificacoes do usuario logado.
   add('GET', '/api/notifications', (ctx) => {
     requireAuth(ctx);
     const notifications = ctx.db.prepare(`
       SELECT n.*, a.display_name AS actor_name, a.username AS actor_username, a.role AS actor_role,
-        a.avatar_url AS actor_avatar_url
+        a.avatar_url AS actor_avatar_url, a.last_seen_at AS actor_last_seen_at
       FROM notifications n
       LEFT JOIN users a ON a.id = n.actor_id
       WHERE n.user_id = ?
@@ -523,7 +543,9 @@ function buildRoutes() {
         displayName: row.actor_name,
         username: row.actor_username,
         role: row.actor_role,
-        avatarUrl: row.actor_avatar_url || ''
+        avatarUrl: row.actor_avatar_url || '',
+        lastSeenAt: toIso(row.actor_last_seen_at),
+        online: isOnlineTimestamp(row.actor_last_seen_at)
       } : null
     }));
     sendJson(ctx.res, 200, { notifications });
@@ -968,6 +990,7 @@ function fetchPosts(db, whereAndOrderSql, params, viewerId) {
       u.role AS authorRole,
       u.bio AS authorBio,
       u.avatar_url AS authorAvatarUrl,
+      u.last_seen_at AS authorLastSeenAt,
       op.id AS originalId,
       op.body AS originalBody,
       op.created_at AS originalCreatedAt,
@@ -976,6 +999,7 @@ function fetchPosts(db, whereAndOrderSql, params, viewerId) {
       ou.username AS originalAuthorUsername,
       ou.role AS originalAuthorRole,
       ou.avatar_url AS originalAuthorAvatarUrl,
+      ou.last_seen_at AS originalAuthorLastSeenAt,
       (SELECT COUNT(*) FROM likes l WHERE l.post_id = COALESCE(p.repost_of_id, p.id)) AS likeCount,
       (SELECT COUNT(*) FROM posts replies WHERE replies.parent_id = COALESCE(p.repost_of_id, p.id) AND replies.deleted_at IS NULL) AS replyCount,
       (SELECT COUNT(*) FROM posts reposts WHERE reposts.repost_of_id = COALESCE(p.repost_of_id, p.id) AND reposts.deleted_at IS NULL) AS repostCount,
@@ -1044,7 +1068,9 @@ function postShape(row) {
       displayName: row.originalAuthorName,
       username: row.originalAuthorUsername,
       role: row.originalAuthorRole,
-      avatarUrl: row.originalAuthorAvatarUrl || ''
+      avatarUrl: row.originalAuthorAvatarUrl || '',
+      lastSeenAt: toIso(row.originalAuthorLastSeenAt),
+      online: isOnlineTimestamp(row.originalAuthorLastSeenAt)
     }
   } : null;
 
@@ -1065,7 +1091,9 @@ function postShape(row) {
       username: row.authorUsername,
       role: row.authorRole,
       bio: row.authorBio || '',
-      avatarUrl: row.authorAvatarUrl || ''
+      avatarUrl: row.authorAvatarUrl || '',
+      lastSeenAt: toIso(row.authorLastSeenAt),
+      online: isOnlineTimestamp(row.authorLastSeenAt)
     },
     original,
     media: [],
@@ -1096,6 +1124,30 @@ function getActionTarget(db, postId, viewer) {
   const target = db.prepare('SELECT id, author_id FROM posts WHERE id = ? AND deleted_at IS NULL').get(targetId);
   if (!target) throw new HttpError(404, 'Publicacao original nao encontrada.');
   return target;
+}
+
+
+// Atualiza a presenca do usuario sem escrever no banco a cada requisicao.
+function touchUserPresence(db, user, force = false) {
+  if (!user) return;
+  if (!force && isRecentTimestamp(user.last_seen_at, PRESENCE_TOUCH_SECONDS)) return;
+  db.prepare('UPDATE users SET last_seen_at = CURRENT_TIMESTAMP WHERE id = ?').run(user.id);
+  user.last_seen_at = new Date().toISOString();
+}
+
+
+// Um usuario e considerado online quando teve atividade nos ultimos minutos.
+function isOnlineTimestamp(value) {
+  return isRecentTimestamp(value, ONLINE_WINDOW_SECONDS);
+}
+
+
+// Compara datas gravadas pelo SQLite com uma janela em segundos.
+function isRecentTimestamp(value, windowSeconds) {
+  const iso = toIso(value);
+  if (!iso) return false;
+  const time = Date.parse(iso);
+  return Number.isFinite(time) && Date.now() - time <= windowSeconds * 1000;
 }
 
 
@@ -1215,12 +1267,14 @@ function callSelectSql() {
     caller.bio AS callerBio,
     caller.avatar_url AS callerAvatarUrl,
     caller.banner_url AS callerBannerUrl,
+    caller.last_seen_at AS callerLastSeenAt,
     recipient.display_name AS recipientDisplayName,
     recipient.username AS recipientUsername,
     recipient.role AS recipientRole,
     recipient.bio AS recipientBio,
     recipient.avatar_url AS recipientAvatarUrl,
-    recipient.banner_url AS recipientBannerUrl
+    recipient.banner_url AS recipientBannerUrl,
+    recipient.last_seen_at AS recipientLastSeenAt
   `;
 }
 
@@ -1254,7 +1308,9 @@ function prefixedCallUser(row, prefix) {
     role: row[`${prefix}Role`] || row[`${cap}Role`],
     bio: row[`${prefix}Bio`] || row[`${cap}Bio`] || '',
     avatarUrl: row[`${prefix}AvatarUrl`] || row[`${cap}AvatarUrl`] || '',
-    bannerUrl: row[`${prefix}BannerUrl`] || row[`${cap}BannerUrl`] || ''
+    bannerUrl: row[`${prefix}BannerUrl`] || row[`${cap}BannerUrl`] || '',
+    lastSeenAt: toIso(row[`${prefix}LastSeenAt`] || row[`${cap}LastSeenAt`]),
+    online: isOnlineTimestamp(row[`${prefix}LastSeenAt`] || row[`${cap}LastSeenAt`])
   };
 }
 
@@ -1339,6 +1395,8 @@ function selfUserShape(user) {
     bio: user.bio || '',
     avatarUrl: user.avatar_url || '',
     bannerUrl: user.banner_url || '',
+    lastSeenAt: toIso(user.last_seen_at),
+    online: isOnlineTimestamp(user.last_seen_at),
     suspendedAt: toIso(user.suspended_at),
     createdAt: toIso(user.created_at)
   };
@@ -1355,6 +1413,8 @@ function publicUserShape(user) {
     bio: user.bio || '',
     avatarUrl: user.avatar_url || '',
     bannerUrl: user.banner_url || '',
+    lastSeenAt: toIso(user.last_seen_at),
+    online: isOnlineTimestamp(user.last_seen_at),
     followedByMe: Boolean(user.followed_by_me),
     followerCount: user.follower_count || 0,
     followingCount: user.following_count || 0,

@@ -71,6 +71,11 @@ test('SIX social workflow', async (t) => {
   });
   assert.equal(student.status, 201);
   assert.equal(student.data.user.role, 'student');
+  assert.equal(student.data.user.online, true);
+
+  const presence = await request(base, '/api/presence', { cookie: student.cookie });
+  assert.equal(presence.status, 200);
+  assert.ok(presence.data.onlineUserIds.includes(student.data.user.id));
 
 
   // Imagem PNG minima usada para testar upload sem depender de arquivos externos.
@@ -378,6 +383,17 @@ test('SIX social workflow', async (t) => {
   const search = await request(base, '/api/search?q=SIX', { cookie: student.cookie });
   assert.equal(search.status, 200);
   assert.ok(search.data.posts.length >= 1);
+
+  const logoutStudent = await request(base, '/api/auth/logout', {
+    method: 'POST',
+    cookie: student.cookie,
+    body: {}
+  });
+  assert.equal(logoutStudent.status, 200);
+
+  const presenceAfterLogout = await request(base, '/api/presence', { cookie: admin.cookie });
+  assert.equal(presenceAfterLogout.status, 200);
+  assert.equal(presenceAfterLogout.data.onlineUserIds.includes(student.data.user.id), false);
 });
 
 

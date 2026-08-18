@@ -551,6 +551,7 @@ button:disabled {
 
 /* Avatar circular: mostra imagem enviada ou iniciais do usuario. */
 .avatar {
+  position: relative;
   width: 44px;
   height: 44px;
   border-radius: 50%;
@@ -561,6 +562,38 @@ button:disabled {
   color: white;
   font-weight: 900;
   flex: 0 0 auto;
+}
+
+.avatar.is-online {
+  box-shadow: 0 0 0 2px rgba(0, 186, 124, 0.35), 0 0 14px rgba(0, 186, 124, 0.16);
+}
+
+.avatar.is-online::after {
+  content: "";
+  position: absolute;
+  right: 2px;
+  bottom: 2px;
+  width: 10px;
+  height: 10px;
+  border: 2px solid var(--bg);
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.nav-symbol .nav-avatar.is-online::after {
+  right: 1px;
+  bottom: 1px;
+  width: 7px;
+  height: 7px;
+  border-width: 1px;
+}
+
+.profile-avatar.is-online::after {
+  right: 8px;
+  bottom: 8px;
+  width: 16px;
+  height: 16px;
+  border-width: 3px;
 }
 
 .avatar img {
@@ -582,6 +615,25 @@ button:disabled {
   font-weight: 800;
   color: var(--text);
   text-decoration: none;
+}
+
+.name.is-online,
+.online-name.is-online,
+.profile-name.is-online {
+  text-shadow: 0 0 10px rgba(0, 186, 124, 0.18);
+}
+
+.name.is-online::after,
+.online-name.is-online::after,
+.profile-name.is-online::after {
+  content: "";
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin-left: 6px;
+  border-radius: 50%;
+  background: var(--green);
+  vertical-align: middle;
 }
 
 .username,

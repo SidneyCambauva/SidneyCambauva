@@ -10,6 +10,7 @@ const RTC_CONFIG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 const VOICE_POLL_MS = 4000;
 const VOICE_SIGNAL_POLL_MS = 1200;
 const UNREAD_POLL_MS = 8000;
+const PRESENCE_POLL_MS = 15000;
 const CALL_RING_INTERVAL_MS = 3600;
 const CALL_RING_BURST_SECONDS = 1.15;
 const CALL_NOTIFICATION_TAG = 'six-incoming-call';
@@ -40,7 +41,9 @@ const state = {
   params: {},
   adminTab: 'requests',
   unreadCounts: { notifications: 0, messages: 0 },
-  unreadPollTimer: null
+  unreadPollTimer: null,
+  onlineUserIds: new Set(),
+  presencePollTimer: null
 };
 
 
@@ -106,9 +109,11 @@ async function init() {
   if (state.me) {
     setupDeviceCallAlerts();
     await refreshUnreadCounts(false);
+    await refreshPresence(false);
     await go('home');
     startVoicePolling();
     startUnreadPolling();
+    startPresencePolling();
   } else {
     renderAuth('login');
   }
@@ -214,9 +219,11 @@ function renderAuth(mode) {
       const result = await api(endpoint, { method: 'POST', body: payload });
       state.me = result.user;
       await refreshUnreadCounts(false);
+      await refreshPresence(false);
       await go('home');
       startVoicePolling();
       startUnreadPolling();
+      startPresencePolling();
       showToast(mode === 'register' && result.user.role === 'admin' ? 'Primeira conta criada como admin.' : 'Bem-vindo a SIX.');
     } catch (error) {
       showToast(error.message);
@@ -229,7 +236,10 @@ function renderAuth(mode) {
 async function go(view, params = {}) {
   state.view = view;
   state.params = params;
-  if (state.me) await refreshUnreadCounts(false);
+  if (state.me) {
+    await refreshUnreadCounts(false);
+    await refreshPresence(false);
+  }
   renderShell();
 
   if (view === 'home') await loadHome();
@@ -304,6 +314,41 @@ function stopUnreadPolling() {
   state.unreadPollTimer = null;
 }
 
+
+// Atualiza a lista de usuarios online sem recarregar a tela atual.
+async function refreshPresence(updateDom = true) {
+  if (!state.me) return;
+  try {
+    const data = await api('/api/presence');
+    state.onlineUserIds = new Set((data.onlineUserIds || []).map((id) => Number(id)));
+    if (updateDom) renderPresenceIndicators();
+  } catch {
+    state.onlineUserIds = new Set();
+  }
+}
+
+
+// Aplica ou remove o destaque discreto nos elementos de usuarios ja renderizados.
+function renderPresenceIndicators() {
+  document.querySelectorAll('[data-online-user]').forEach((element) => {
+    const online = state.onlineUserIds.has(Number(element.dataset.onlineUser));
+    element.classList.toggle('is-online', online);
+  });
+}
+
+
+function startPresencePolling() {
+  if (state.presencePollTimer) return;
+  refreshPresence().catch(() => null);
+  state.presencePollTimer = setInterval(() => refreshPresence().catch(() => null), PRESENCE_POLL_MS);
+}
+
+
+function stopPresencePolling() {
+  if (state.presencePollTimer) clearInterval(state.presencePollTimer);
+  state.presencePollTimer = null;
+}
+
 // Estrutura fixa do app logado: menu esquerdo, coluna central e painel direito.
 function renderShell() {
   const staffNav = isStaff() ? [['admin', 'Equipe']] : [];
@@ -327,7 +372,7 @@ function renderShell() {
         <button class="account-mini" data-go="profile">
           ${avatarHtml(state.me)}
           <span class="account-text">
-            <strong>${escapeHtml(state.me.displayName)}</strong><br>
+            <strong class="online-name${onlineClass(state.me)}"${onlineUserAttr(state.me)}>${escapeHtml(state.me.displayName)}</strong><br>
             <span class="username">@${escapeHtml(state.me.username)}</span>
           </span>
         </button>
@@ -518,7 +563,7 @@ function notificationCardHtml(notification) {
       <div class="notice-body">
         <div class="message-top">
           ${actor ? `
-            <button class="name ghost-link" type="button"${actorProfile}>${escapeHtml(actorName)}</button>
+            <button class="name ghost-link${onlineClass(actor)}" type="button"${actorProfile}${onlineUserAttr(actor)}>${escapeHtml(actorName)}</button>
           ` : `<strong>${escapeHtml(actorName)}</strong>`}
           ${notification.readAt ? '' : '<span class="role teacher" data-notice-new>novo</span>'}
         </div>
@@ -605,7 +650,7 @@ async function loadProfile(username) {
         `}
       </div>
       ${avatarHtml(user, 'profile-avatar')}
-      <h2 class="profile-name">${escapeHtml(user.displayName)}</h2>
+      <h2 class="profile-name${onlineClass(user)}"${onlineUserAttr(user)}>${escapeHtml(user.displayName)}</h2>
       <div class="username">@${escapeHtml(user.username)} <span class="role ${escapeAttr(user.role)}">${escapeHtml(roleLabel(user.role))}</span></div>
       <p class="profile-bio">${escapeHtml(user.bio || '')}</p>
       <div class="profile-stats">
@@ -670,7 +715,7 @@ async function renderMessageThread(userId) {
   const panel = document.querySelector('#message-panel');
   panel.innerHTML = `
     <div class="view-header message-head">
-      <h1>${escapeHtml(data.user.displayName)}</h1>
+      <h1 class="online-name${onlineClass(data.user)}"${onlineUserAttr(data.user)}>${escapeHtml(data.user.displayName)}</h1>
       <div class="message-head-actions">
         <button class="ghost-btn" data-profile="${escapeAttr(data.user.username)}">@${escapeHtml(data.user.username)}</button>
         <button class="ghost-btn" type="button" data-start-voice="${data.user.id}">Voz</button>
@@ -1100,7 +1145,7 @@ function renderVoiceCallPanel() {
       <div class="voice-call-main">
         ${avatarHtml(voiceState.peer || call.peer)}
         <div>
-          <strong>${escapeHtml((voiceState.peer || call.peer).displayName)}</strong>
+          <strong class="online-name${onlineClass(voiceState.peer || call.peer)}"${onlineUserAttr(voiceState.peer || call.peer)}>${escapeHtml((voiceState.peer || call.peer).displayName)}</strong>
           <span>${escapeHtml(title)} - ${escapeHtml(status)}</span>
         </div>
       </div>
@@ -1574,7 +1619,7 @@ function postHtml(post) {
       <div>
         ${post.original ? `<div class="repost-line">${escapeHtml(post.author.displayName)} repostou</div>` : ''}
         <div class="post-top">
-          <button class="name ghost-link" data-profile="${escapeAttr(post.author.username)}">${escapeHtml(post.author.displayName)}</button>
+          <button class="name ghost-link${onlineClass(post.author)}" data-profile="${escapeAttr(post.author.username)}"${onlineUserAttr(post.author)}>${escapeHtml(post.author.displayName)}</button>
           <span class="username">@${escapeHtml(post.author.username)}</span>
           <span class="role ${escapeAttr(post.author.role)}">${escapeHtml(roleLabel(post.author.role))}</span>
           <span class="time">${formatTime(post.createdAt)}</span>
@@ -1600,7 +1645,7 @@ function quoteHtml(post) {
   return `
     <div class="quote-card" data-open-post="${post.id}">
       <div class="post-top">
-        <strong>${escapeHtml(post.author.displayName)}</strong>
+        <strong class="online-name${onlineClass(post.author)}"${onlineUserAttr(post.author)}>${escapeHtml(post.author.displayName)}</strong>
         <span class="username">@${escapeHtml(post.author.username)}</span>
         <span class="time">${formatTime(post.createdAt)}</span>
       </div>
@@ -1777,7 +1822,7 @@ function userCardHtml(user) {
     <article class="user-card">
       ${avatarHtml(user)}
       <div>
-        <button class="name ghost-link" data-profile="${escapeAttr(user.username)}">${escapeHtml(user.displayName)}</button>
+        <button class="name ghost-link${onlineClass(user)}" data-profile="${escapeAttr(user.username)}"${onlineUserAttr(user)}>${escapeHtml(user.displayName)}</button>
         <div class="username">@${escapeHtml(user.username)} <span class="role ${escapeAttr(user.role)}">${escapeHtml(roleLabel(user.role))}</span></div>
         <div class="muted">${escapeHtml(user.bio || '')}</div>
       </div>
@@ -1818,7 +1863,7 @@ function conversationButtonHtml(user, lastMessage = '', active = false, unread =
       <div class="user-row">
         ${avatarHtml(user)}
         <div>
-          <strong>${escapeHtml(user.displayName)}</strong>
+          <strong class="online-name${onlineClass(user)}"${onlineUserAttr(user)}>${escapeHtml(user.displayName)}</strong>
           <div class="username">@${escapeHtml(user.username)}${unread ? ` · ${unread} nova(s)` : ''}</div>
         </div>
       </div>
@@ -1893,7 +1938,7 @@ function adminUserHtml(user) {
       <div class="user-row">
         ${avatarHtml(user)}
         <div>
-          <strong>${escapeHtml(user.displayName)}</strong>
+          <strong class="online-name${onlineClass(user)}"${onlineUserAttr(user)}>${escapeHtml(user.displayName)}</strong>
           <div class="username">@${escapeHtml(user.username)} · ${escapeHtml(user.email)}</div>
           <div class="muted">${user.postCount} publicacoes · ${user.followerCount} seguidores</div>
         </div>
@@ -2112,9 +2157,11 @@ async function logout() {
   stopVoicePolling();
   stopIncomingCallAlert();
   stopUnreadPolling();
+  stopPresencePolling();
   await api('/api/auth/logout', { method: 'POST', body: {} });
   state.me = null;
   state.unreadCounts = { notifications: 0, messages: 0 };
+  state.onlineUserIds = new Set();
   renderAuth('login');
 }
 
@@ -2173,9 +2220,31 @@ function initialsFor(user) {
 // Renderiza avatar com imagem enviada ou iniciais geradas.
 function avatarHtml(user, extraClass = '') {
   const initials = initialsFor(user);
-  const cls = `avatar ${extraClass}`.trim();
-  if (user.avatarUrl) return `<span class="${cls}"><img src="${escapeAttr(mediaUrl(user.avatarUrl))}" alt=""></span>`;
-  return `<span class="${cls}">${escapeHtml(initials || 'S')}</span>`;
+  const cls = `avatar ${extraClass}${onlineClass(user)}`.trim();
+  const attrs = onlineUserAttr(user);
+  if (user.avatarUrl) return `<span class="${cls}"${attrs}><img src="${escapeAttr(mediaUrl(user.avatarUrl))}" alt=""></span>`;
+  return `<span class="${cls}"${attrs}>${escapeHtml(initials || 'S')}</span>`;
+}
+
+
+// Verifica se um usuario deve receber o destaque online na interface.
+function isUserOnline(user) {
+  const id = Number(user?.id);
+  if (id && state.onlineUserIds.has(id)) return true;
+  return Boolean(user?.online);
+}
+
+
+// Classe aplicada em nomes e avatares quando o usuario esta online.
+function onlineClass(user) {
+  return isUserOnline(user) ? ' is-online' : '';
+}
+
+
+// Atributo usado pelo polling de presenca para atualizar elementos existentes.
+function onlineUserAttr(user) {
+  const id = Number(user?.id);
+  return id ? ` data-online-user="${escapeAttr(id)}"` : '';
 }
 
 

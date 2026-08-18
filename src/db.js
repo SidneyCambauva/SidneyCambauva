@@ -30,6 +30,7 @@ function initializeSchema(db) {
       avatar_url TEXT NOT NULL DEFAULT '',
       banner_url TEXT NOT NULL DEFAULT '',
       suspended_at TEXT,
+      last_seen_at TEXT,
       created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );
 
@@ -158,8 +159,19 @@ function initializeSchema(db) {
     CREATE INDEX IF NOT EXISTS idx_reports_status ON reports(status, created_at DESC);
     CREATE INDEX IF NOT EXISTS idx_deletion_requests_status ON deletion_requests(status, created_at DESC);
   `);
+  migrateUsersForPresence(db);
   migratePostsForMedia(db);
   migrateVoiceCallsForVideo(db);
+}
+
+
+// Migra bancos antigos para guardar a ultima atividade usada no status online.
+function migrateUsersForPresence(db) {
+  const columns = db.prepare("PRAGMA table_info(users)").all();
+  if (!columns.some((column) => column.name === 'last_seen_at')) {
+    db.exec("ALTER TABLE users ADD COLUMN last_seen_at TEXT;");
+  }
+  db.exec("CREATE INDEX IF NOT EXISTS idx_users_last_seen ON users(last_seen_at);");
 }
 
 

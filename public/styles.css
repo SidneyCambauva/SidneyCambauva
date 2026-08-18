@@ -994,11 +994,33 @@ button:disabled {
   max-height: 120px;
   resize: vertical;
 }
+
+.message-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, auto);
+  align-items: center;
+}
+
+.message-head h1 {
+  min-width: 0;
+  overflow-wrap: anywhere;
+  line-height: 1.18;
+}
+
 .message-head-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
   gap: 8px;
   min-width: 0;
+  max-width: min(100%, 270px);
+}
+
+.message-head-actions .ghost-btn,
+.message-head-actions .primary-btn {
+  min-width: 0;
+  white-space: nowrap;
 }
 
 .voice-call-panel {
@@ -1402,10 +1424,13 @@ button:disabled {
   }
 
   .message-head {
+    display: flex;
+    flex-direction: column;
     align-items: flex-start;
   }
 
   .message-head-actions {
+    max-width: none;
     width: 100%;
     justify-content: space-between;
     gap: 6px;
